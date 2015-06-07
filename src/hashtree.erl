@@ -177,13 +177,13 @@
                 tree           :: dict:dict(),
                 ref            :: term(),
                 path           :: string(),
-                itr            :: term(),
+                snapshot       :: term(),
                 write_buffer   :: [{put, binary(), binary()} | {delete, binary()}],
                 write_buffer_count :: integer(),
                 dirty_segments :: array:array()
                }).
 
--record(itr_state, {itr                :: term(),
+-record(itr_state, {snapshot           :: term(),
                     id                 :: tree_id_bin(),
                     current_segment    :: '*' | integer(),
                     remaining_segments :: ['*' | integer()],
@@ -245,25 +245,15 @@ new({Index,TreeId}, LinkedStore, Options) ->
 
 -spec close(hashtree()) -> hashtree().
 close(State) ->
-    close_iterator(State#state.itr),
-    catch eleveldb:close(State#state.ref),
-    State#state{itr=undefined}.
-
-close_iterator(Itr) ->
-    try
-        eleveldb:iterator_close(Itr)
-    catch
-        _:_ ->
-            ok
-    end.
+    State#state{snapshot=undefined}.
 
 -spec destroy(string() | hashtree()) -> ok | hashtree().
-destroy(Path) when is_list(Path) ->
-    ok = eleveldb:destroy(Path, []);
+destroy(Name) when is_list(Path) ->
+    ok = lets:destroy(Name, []);
 destroy(State) ->
     %% Assumption: close was already called on all hashtrees that
     %%             use this LevelDB instance,
-    ok = eleveldb:destroy(State#state.path, []),
+    ok = lets:destroy(State#state.ref, []),
     State.
 
 -spec insert(binary(), binary(), hashtree()) -> hashtree().
@@ -304,10 +294,22 @@ maybe_flush_buffer(State=#state{write_buffer_count=WCount}) ->
 
 flush_buffer(State=#state{write_buffer=WBuffer}) ->
     %% Write buffer is built backwards, reverse to build update list
+
+    %% For lets, we need to "flush" by doing a side-effectful
+    %% iteration of the updates. !WARNING! The performance penalties
+    %% are surely quite large by doing it this way instead of a true
+    %% buffered flush to some lower-level machinery (that was present
+    %% in eleveldb).
     Updates = lists:reverse(WBuffer),
-    ok = eleveldb:write(State#state.ref, Updates, []),
+    lists:foreach(fun(Action) -> lets_write(State#state.ref, Action) end, Updates),
     State#state{write_buffer=[],
                 write_buffer_count=0}.
+
+
+lets_write(Ref, {put, Key, Obj}) ->
+    lets:insert(Ref, Key, Obj);
+lets_write(Ref, {delete, binary()}) ->
+    lets:delete(Ref, Key).
 
 -spec delete(binary(), hashtree()) -> hashtree().
 delete(Key, State) ->
@@ -325,9 +327,11 @@ should_insert(HKey, Opts, State) ->
     case IfMissing of
         true ->
             %% Only insert if object does not already exist
-            %% TODO: Use bloom filter so we don't always call get here
-            case eleveldb:get(State#state.ref, HKey, []) of
-                not_found ->
+            
+            %% TODO (BASHO): Use bloom filter so we don't always call
+            %% get here.
+            case lets:lookup(State#state.ref, HKey) of
+                [] ->
                     true;
                 _ ->
                     false
@@ -414,16 +418,16 @@ mem_levels(#state{mem_levels=M}) ->
 -spec write_meta(binary(), binary(), hashtree()) -> hashtree().
 write_meta(Key, Value, State) when is_binary(Key) and is_binary(Value) ->
     HKey = encode_meta(Key),
-    ok = eleveldb:put(State#state.ref, HKey, Value, []),
+    ok = lets:insert(State#state.ref, {HKey, Value}),
     State.
 
 -spec read_meta(binary(), hashtree()) -> {ok, binary()} | undefined.
 read_meta(Key, State) when is_binary(Key) ->
     HKey = encode_meta(Key),
-    case eleveldb:get(State#state.ref, HKey, []) of
-        {ok, Value} ->
+    case lets:lookup(State#state.ref, HKey) of
+        [Value] ->
             {ok, Value};
-        _ ->
+        [] ->
             undefined
     end.
 
@@ -517,11 +521,22 @@ new_segment_store(Opts, State) ->
     Config3 = orddict:erase(write_buffer_size_min, Config2),
     Config4 = orddict:erase(write_buffer_size_max, Config3),
     Config5 = orddict:store(is_internal_db, true, Config4),
-    Config6 = orddict:store(use_bloomfilter, true, Config5),
-    Options = orddict:store(create_if_missing, true, Config6),
+    Config6 = orddict:store(filter_policy, {bloom, 16}, Config5),
+    Config7 = orddict:store(path, DataDir, Config6)
+    Options = orddict:store(create_if_missing, true, Config7),
 
     ok = filelib:ensure_dir(DataDir),
-    {ok, Ref} = eleveldb:open(DataDir, Options),
+
+    Ref = lets:new( plumtree_hashtree
+                  , [ ordered_set
+                    , named_table
+                    , compressed
+                    , async
+                    , drv
+                    , {db, Options}
+                    ])
+
+
     State#state{ref=Ref, path=DataDir}.
 
 -spec share_segment_store(hashtree(), hashtree()) -> hashtree().
@@ -621,10 +636,10 @@ set_memory_bucket(Level, Bucket, Val, State) ->
 -spec get_disk_bucket(integer(), integer(), hashtree()) -> any().
 get_disk_bucket(Level, Bucket, #state{id=Id, ref=Ref}) ->
     HKey = encode_bucket(Id, Level, Bucket),
-    case eleveldb:get(Ref, HKey, []) of
-        {ok, Bin} ->
+    case lets:lookup(Ref, HKey) of
+        [Bin] ->
             binary_to_term(Bin);
-        _ ->
+        [] ->
             orddict:new()
     end.
 
@@ -632,7 +647,7 @@ get_disk_bucket(Level, Bucket, #state{id=Id, ref=Ref}) ->
 set_disk_bucket(Level, Bucket, Val, State=#state{id=Id, ref=Ref}) ->
     HKey = encode_bucket(Id, Level, Bucket),
     Bin = term_to_binary(Val),
-    ok = eleveldb:put(Ref, HKey, Bin, []),
+    true = lets:insert(Ref, {HKey, Bin}),
     State.
 
 -spec encode_id(binary() | non_neg_integer()) -> tree_id_bin().
@@ -680,16 +695,14 @@ hashes(State, Segments) ->
 
 -spec snapshot(hashtree()) -> hashtree().
 snapshot(State) ->
-    %% Abuse eleveldb iterators as snapshots
-    catch eleveldb:iterator_close(State#state.itr),
-    {ok, Itr} = eleveldb:iterator(State#state.ref, []),
-    State#state{itr=Itr}.
+    Snap = lets:tab2list(State#state.ref),
+    State#state{ snapshot=Snap }.
 
 -spec multi_select_segment(hashtree(), list('*'|integer()), select_fun(T))
                           -> [{integer(), T}].
-multi_select_segment(#state{id=Id, itr=Itr}, Segments, F) ->
+multi_select_segment(#state{id=Id, snapshot=Snap}, Segments, F) ->
     [First | Rest] = Segments,
-    IS1 = #itr_state{itr=Itr,
+    IS1 = #itr_state{snapshot=Snap,
                      id=Id,
                      current_segment=First,
                      remaining_segments=Rest,
@@ -702,7 +715,7 @@ multi_select_segment(#state{id=Id, itr=Itr}, Segments, F) ->
                _ ->
                    encode(Id, First, <<>>)
            end,
-    IS2 = iterate(iterator_move(Itr, Seek), IS1),
+    IS2 = iterate(iterator_move(Snap, Seek), IS1),
     #itr_state{current_segment=LastSegment,
                segment_acc=LastAcc,
                final_acc=FA} = IS2,
@@ -717,12 +730,13 @@ multi_select_segment(#state{id=Id, itr=Itr}, Segments, F) ->
 
 iterator_move(undefined, _Seek) ->
     {error, invalid_iterator};
-iterator_move(Itr, Seek) ->
-    try
-
-        eleveldb:iterator_move(Itr, Seek)
-    catch
-        _:badarg ->
+iterator_move(Snap, Seek) ->
+    case lists:keyfind(Seek, 1, Snap) of
+        {Key, Binary} -> 
+            {ok, Key, Binary};
+        {Key} ->
+            {ok, Key};
+        false ->
             {error, invalid_iterator}
     end.
 
@@ -730,7 +744,7 @@ iterator_move(Itr, Seek) ->
               #itr_state{}) -> #itr_state{}.
 iterate({error, invalid_iterator}, IS=#itr_state{}) ->
     IS;
-iterate({ok, K, V}, IS=#itr_state{itr=Itr,
+iterate({ok, K, V}, IS=#itr_state{snapshot=Snap,
                                   id=Id,
                                   current_segment=CurSeg,
                                   remaining_segments=Segments,
@@ -753,7 +767,7 @@ iterate({ok, K, V}, IS=#itr_state{itr=Itr,
             IS2 = IS#itr_state{current_segment=Segment,
                                segment_acc=[{K,V} | Acc],
                                prefetch=true},
-            iterate(iterator_move(Itr, prefetch), IS2);
+            iterate(iterator_move(Snap, prefetch), IS2);
         {Id, _, [Seg|Remaining], _} ->
             %% Pointing at next segment we are interested in
             IS2 = IS#itr_state{current_segment=Seg,
@@ -761,7 +775,7 @@ iterate({ok, K, V}, IS=#itr_state{itr=Itr,
                                segment_acc=[{K,V}],
                                final_acc=[{Segment, F(Acc)} | FinalAcc],
                                prefetch=true},
-            iterate(iterator_move(Itr, prefetch), IS2);
+            iterate(iterator_move(Snap, prefetch), IS2);
         {Id, _, ['*'], _} ->
             %% Pointing at next segment we are interested in
             IS2 = IS#itr_state{current_segment=Seg,
@@ -769,7 +783,7 @@ iterate({ok, K, V}, IS=#itr_state{itr=Itr,
                                segment_acc=[{K,V}],
                                final_acc=[{Segment, F(Acc)} | FinalAcc],
                                prefetch=true},
-            iterate(iterator_move(Itr, prefetch), IS2);
+            iterate(iterator_move(Snap, prefetch), IS2);
         {Id, NextSeg, [NextSeg|Remaining], _} ->
             %% A previous prefetch_stop left us at the start of the
             %% next interesting segment.
@@ -777,14 +791,14 @@ iterate({ok, K, V}, IS=#itr_state{itr=Itr,
                                remaining_segments=Remaining,
                                segment_acc=[{K,V}],
                                prefetch=true},
-            iterate(iterator_move(Itr, prefetch), IS2);
+            iterate(iterator_move(Snap, prefetch), IS2);
         {Id, _, [_NextSeg | _Remaining], true} ->
             %% Pointing at uninteresting segment, but need to halt the
             %% prefetch to ensure the interator can be reused
             IS2 = IS#itr_state{segment_acc=[],
                                final_acc=[{Segment, F(Acc)} | FinalAcc],
                                prefetch=false},
-            iterate(iterator_move(Itr, prefetch_stop), IS2);
+            iterate(iterator_move(Snap, prefetch_stop), IS2);
         {Id, _, [NextSeg | Remaining], false} ->
             %% Pointing at uninteresting segment, seek to next interesting one
             Seek = encode(Id, NextSeg, <<>>),
@@ -792,13 +806,13 @@ iterate({ok, K, V}, IS=#itr_state{itr=Itr,
                                remaining_segments=Remaining,
                                segment_acc=[],
                                final_acc=[{Segment, F(Acc)} | FinalAcc]},
-            iterate(iterator_move(Itr, Seek), IS2);
+            iterate(iterator_move(Snap, Seek), IS2);
         {_, _, _, true} ->
             %% Done with traversal, but need to stop the prefetch to
             %% ensure the iterator can be reused. The next operation
             %% with this iterator is a seek so no need to be concerned
             %% with the data returned here.
-            _ = iterator_move(Itr, prefetch_stop),
+            _ = iterator_move(Snap, prefetch_stop),
             IS#itr_state{prefetch=false};
         {_, _, _, false} ->
             %% Done with traversal
