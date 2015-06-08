@@ -248,7 +248,7 @@ close(State) ->
     State#state{snapshot=undefined}.
 
 -spec destroy(string() | hashtree()) -> ok | hashtree().
-destroy(Name) when is_list(Path) ->
+destroy(Name) when is_list(Name) ->
     ok = lets:destroy(Name, []);
 destroy(State) ->
     %% Assumption: close was already called on all hashtrees that
@@ -308,7 +308,7 @@ flush_buffer(State=#state{write_buffer=WBuffer}) ->
 
 lets_write(Ref, {put, Key, Obj}) ->
     lets:insert(Ref, Key, Obj);
-lets_write(Ref, {delete, binary()}) ->
+lets_write(Ref, {delete, Key}) ->
     lets:delete(Ref, Key).
 
 -spec delete(binary(), hashtree()) -> hashtree().
@@ -522,7 +522,7 @@ new_segment_store(Opts, State) ->
     Config4 = orddict:erase(write_buffer_size_max, Config3),
     Config5 = orddict:store(is_internal_db, true, Config4),
     Config6 = orddict:store(filter_policy, {bloom, 16}, Config5),
-    Config7 = orddict:store(path, DataDir, Config6)
+    Config7 = orddict:store(path, DataDir, Config6),
     Options = orddict:store(create_if_missing, true, Config7),
 
     ok = filelib:ensure_dir(DataDir),
@@ -534,9 +534,8 @@ new_segment_store(Opts, State) ->
                     , async
                     , drv
                     , {db, Options}
-                    ])
-
-
+                    ]),
+    
     State#state{ref=Ref, path=DataDir}.
 
 -spec share_segment_store(hashtree(), hashtree()) -> hashtree().
