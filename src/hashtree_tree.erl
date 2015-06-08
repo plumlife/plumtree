@@ -454,7 +454,7 @@ create_node(?ROOT, Tree) ->
     Opts = [{segment_path, NodePath}, {segments, NumSegs}, {width, Width}],
     %% destroy any data that previously existed because its lingering from
     %% a tree that was not properly destroyed
-    ok = hashtree:destroy(NodePath),
+    hashtree:destroy(NodePath),
     Node = hashtree:new(NodeId, Opts),
     set_node(?ROOT, Node, Tree);
 create_node([], Tree) ->

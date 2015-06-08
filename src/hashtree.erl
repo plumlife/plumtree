@@ -247,13 +247,31 @@ new({Index,TreeId}, LinkedStore, Options) ->
 close(State) ->
     State#state{snapshot=undefined}.
 
--spec destroy(string() | hashtree()) -> ok | hashtree().
+-spec destroy(string() | hashtree()) -> boolean() | hashtree().
 destroy(Name) when is_list(Name) ->
-    ok = lets:destroy(Name, []);
+    Tabs = lets:all(),
+    HashtreeTab = lists:map(fun(T) ->
+        case lets:info(T, name) of
+            plumtree_hashtree -> true;
+            _ -> false
+        end end, Tabs
+    ),
+
+    case HashtreeTab of
+        [H|_] ->
+            lets:delete(H);
+        [] ->
+            lager:notice("No table to close")
+    end;
 destroy(State) ->
     %% Assumption: close was already called on all hashtrees that
     %%             use this LevelDB instance,
-    ok = lets:destroy(State#state.ref, []),
+    case lets:info(State#state.ref, name) of
+        plumtree_hashtree ->
+            lets:delete(State#state.ref);
+        _ ->
+            lager:warning("Attempted to close a table we don't own")
+    end,
     State.
 
 -spec insert(binary(), binary(), hashtree()) -> hashtree().
@@ -501,7 +519,8 @@ new_segment_store(Opts, State) ->
                       <<P:128/integer>> = md5(term_to_binary({erlang:now(), make_ref()})),
                       filename:join(Root, integer_to_list(P));
                   SegmentPath ->
-                      SegmentPath
+                      <<P:128/integer>> = md5(term_to_binary({erlang:now(), make_ref()})),
+                      filename:join(SegmentPath, integer_to_list(P))
               end,
 
     DefaultWriteBufferMin = 4 * 1024 * 1024,
@@ -520,19 +539,15 @@ new_segment_store(Opts, State) ->
     Config2 = orddict:store(write_buffer_size, WriteBufferSize, Config),
     Config3 = orddict:erase(write_buffer_size_min, Config2),
     Config4 = orddict:erase(write_buffer_size_max, Config3),
-    Config5 = orddict:store(is_internal_db, true, Config4),
-    Config6 = orddict:store(filter_policy, {bloom, 16}, Config5),
-    Config7 = orddict:store(path, DataDir, Config6),
-    Options = orddict:store(create_if_missing, true, Config7),
+    Config5 = orddict:store(filter_policy, {bloom, 16}, Config4),
+    Config6 = orddict:store(path, DataDir, Config5),
+    Options = orddict:store(create_if_missing, true, Config6),
 
     ok = filelib:ensure_dir(DataDir),
 
     Ref = lets:new( plumtree_hashtree
                   , [ ordered_set
-                    , named_table
                     , compressed
-                    , async
-                    , drv
                     , {db, Options}
                     ]),
     
