@@ -1,7 +1,9 @@
 plumtree
 ========
 
-**NOTE: this is Plum's fork of the original `plumtree` library that has swapped out `eleveldb` and Basho's `leveldb` forks for `lets`. Please read below in the "Plum's Fork" section as there are important performance considerations to be aware of before you use this.**
+**NOTE: this is Plum's fork of the original `plumtree` library, we've swapped out `eleveldb` and Basho's
+`leveldb` forks for `lets`. Please read below in the "Plum's Fork" section as there are important
+performance considerations to be aware of before you use this.**
 
 Plumtree is an implementation of Plumtree[1], the epidemic broadcast protocol. It is extracted from the
 implementation in riak_core[2]. Instead of the riak_core ring and riak's ring gossip protocol, it includes a
