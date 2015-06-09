@@ -756,7 +756,7 @@ iterator_move(Snap, Seek) ->
             {error, invalid_iterator}
     end.
 
--spec iterate({'error','invalid_iterator'} | {'ok',binary(),binary()},
+-spec iterate({'error','invalid_iterator'} | {binary(),binary()},
               #itr_state{}) -> #itr_state{}.
 iterate({error, invalid_iterator}, IS=#itr_state{}) ->
     IS;
