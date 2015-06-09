@@ -745,7 +745,7 @@ multi_select_segment(#state{id=Id, snapshot=Snap}, Segments, F) ->
 iterator_move(undefined, _Seek) ->
     {error, invalid_iterator};
 iterator_move(Snap, Seek) ->
-    case lists:keyfind(Seek, Snap) of
+    case lists:keyfind(Seek, 1, Snap) of
         {Key, Binary} -> 
             {ok, Key, Binary};
         false ->
