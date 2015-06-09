@@ -14,7 +14,7 @@ common_test:
 	rebar3 ct
 
 compile: deps
-	rebar3 compile
+	./build.sh
 
 rel:
 	rebar3 release
