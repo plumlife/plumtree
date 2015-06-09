@@ -250,27 +250,22 @@ close(State) ->
 -spec destroy(string() | hashtree()) -> boolean() | hashtree().
 destroy(Name) when is_list(Name) ->
     Tabs = lets:all(),
-    HashtreeTab = lists:filter(fun(T) ->
-        case catch lets:info(T, name) of
-            plumtree_hashtree -> true;
-            _ -> false
-        end end, Tabs
-    ),
-
-    case HashtreeTab of
-        [H|_] ->
-            lets:delete(H);
-        [] ->
-            lager:notice("No table to close")
+    TabNames = lists:map(fun(T) -> {lets:info(T, name), T} end, Tabs),
+    
+    case proplists:lookup(filename:basename(Name), TabNames) of
+        none ->
+            lager:notice("No tab is opened by that name");
+        {_, Tab} ->
+            lets:delete(Tab)
     end;
 destroy(State) ->
     %% Assumption: close was already called on all hashtrees that
     %%             use this LevelDB instance,
-    case catch lets:info(State#state.ref, name) of
-        plumtree_hashtree ->
-            lets:delete(State#state.ref);
-        _ ->
-            lager:warning("Attempted to close a table we don't own")
+    try
+        lets:delete(State#state.ref)
+    catch
+        _:E ->
+            lager:warning("Attempted to close a table: ~p", [E])
     end,
     State.
 
@@ -442,7 +437,7 @@ write_meta(Key, Value, State) when is_binary(Key) and is_binary(Value) ->
 -spec read_meta(binary(), hashtree()) -> {ok, binary()} | undefined.
 read_meta(Key, State) when is_binary(Key) ->
     HKey = encode_meta(Key),
-    case catch lets:lookup(State#state.ref, HKey) of
+    case lets:lookup(State#state.ref, HKey) of
         [{_, Value}] ->
             {ok, Value};
         [] ->
@@ -519,8 +514,7 @@ new_segment_store(Opts, State) ->
                       <<P:128/integer>> = md5(term_to_binary({erlang:now(), make_ref()})),
                       filename:join(Root, integer_to_list(P));
                   SegmentPath ->
-                      <<P:128/integer>> = md5(term_to_binary({erlang:now(), make_ref()})),
-                      filename:join(SegmentPath, integer_to_list(P))
+                      SegmentPath
               end,
 
     DefaultWriteBufferMin = 4 * 1024 * 1024,
@@ -545,7 +539,8 @@ new_segment_store(Opts, State) ->
 
     ok = filelib:ensure_dir(DataDir),
 
-    Ref = lets:new( plumtree_hashtree
+    TabName = filename:basename(DataDir),
+    Ref = lets:new( TabName
                   , [ ordered_set
                     , compressed
                     , public
@@ -651,7 +646,7 @@ set_memory_bucket(Level, Bucket, Val, State) ->
 -spec get_disk_bucket(integer(), integer(), hashtree()) -> any().
 get_disk_bucket(Level, Bucket, #state{id=Id, ref=Ref}) ->
     HKey = encode_bucket(Id, Level, Bucket),
-    case catch lets:lookup(Ref, HKey) of
+    case lets:lookup(Ref, HKey) of
         [{_, Bin}] ->
             binary_to_term(Bin);
         [] ->
@@ -749,8 +744,6 @@ iterator_move(Snap, Seek) ->
     case lists:keyfind(Seek, 1, Snap) of
         {Key, Binary} -> 
             {ok, Key, Binary};
-        {Key} ->
-            {ok, Key};
         false ->
             {error, invalid_iterator}
     end.

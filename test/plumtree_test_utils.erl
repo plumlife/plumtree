@@ -107,7 +107,7 @@ start_node(Name, Config, Case) ->
                     ]}],
     case ct_slave:start(Name, NodeConfig) of
         {ok, Node} ->
-
+            lager:debug("Starting up node: ~p", [Node]),
             PrivDir = proplists:get_value(priv_dir, Config),
             NodeDir = filename:join([PrivDir, Node, Case]),
             ok = rpc:call(Node, application, load, [plumtree]),
