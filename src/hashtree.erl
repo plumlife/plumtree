@@ -717,7 +717,11 @@ multi_select_segment(#state{id=Id, snapshot=Snap}, Segments, F) ->
 
     %% Convert from using the iterate function explicitly to using it
     %% in a folding function
-    IS2 = lists:foldl(fun iterate/2, IS1, Snap),
+    IS2 = case Snap of
+              undefined -> IS1;
+              Snapshot  -> lists:foldl(fun iterate/2, IS1, Snapshot)
+    end,
+
     %%IS2 = iterate(iterator_move(Snap, Seek), IS1),
     #itr_state{current_segment=LastSegment,
                segment_acc=LastAcc,
