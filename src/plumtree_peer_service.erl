@@ -66,8 +66,40 @@ attempt_join(Node, Local) ->
     Members = riak_dt_orswot:value(Merged),
     _ = [gen_server:cast({plumtree_peer_service_gossip, P}, {receive_state, Merged}) || P <- Members, P /= node()],
     ok.
-    
-leave(_Args) when is_list(_Args) ->
+
+leave() ->
+    leave(node()).
+
+leave(NodeID) ->
+    {ok, Local} = plumtree_peer_service_manager:get_local_state(),
+    {ok, Actor} = plumtree_peer_service_manager:get_actor(),
+    {ok, Leave} = riak_dt_orswot:update({remove, NodeID}, Actor, Local),
+
+    case random_peer(Leave) of
+        {ok, Peer} ->
+            {ok, Remote} = gen_server:call({plumtree_peer_service_gossip, Peer}, send_state),
+            Merged = riak_dt_orswot:merge(Leave, Remote),
+            _ = gen_server:cast({plumtree_peer_service_gossip, Peer}, {receive_state, Merged}),
+            {ok, Remote2} = gen_server:call({plumtree_peer_service_gossip, Peer}, send_state),
+            Remote2List = riak_dt_orswot:value(Remote2),
+            case [P || P <- Remote2List, P =:= NodeID] of
+                [] ->
+                    cleanup_state(NodeID);
+                _ ->
+                    leave(NodeID)
+            end;
+        {error, singleton} ->
+            lager:warning("Cannot leave, not a member of a cluster.")
+    end.
+
+cleanup_state(NodeID)
+  when NodeID == node() ->
+    plumtree_peer_service_manager:delete_state();
+cleanup_state(NodeID) ->
+    lager:warning("Not deleting state since we're only removing a node").
+
+
+old_leave(_Args) when is_list(_Args) ->
     {ok, Local} = plumtree_peer_service_manager:get_local_state(),
     {ok, Actor} = plumtree_peer_service_manager:get_actor(),
     {ok, Leave} = riak_dt_orswot:update({remove, node()}, Actor, Local),
@@ -84,13 +116,13 @@ leave(_Args) when is_list(_Args) ->
                     plumtree_peer_service_manager:delete_state(),
                     stop("Leaving cluster");
                 _ ->
-                    leave([])
+                    old_leave([])
             end;
         {error, singleton} ->
             lager:warning("Cannot leave, not a member of a cluster.")
     end;
-leave(_Args) ->
-    leave([]).
+old_leave(_Args) ->
+    old_leave([]).
 
 stop() ->
     stop("received stop request").
@@ -98,6 +130,8 @@ stop() ->
 stop(Reason) ->
     lager:notice("~p", [Reason]),
     init:stop().
+
+
 
 random_peer(Leave) ->
     Members = riak_dt_orswot:value(Leave),
