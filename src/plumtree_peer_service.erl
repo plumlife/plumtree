@@ -25,7 +25,9 @@
          join/3,
          attempt_join/1,
          attempt_join/2,
+         leave/0,
          leave/1,
+         old_leave/1,
          stop/0,
          stop/1
         ]).
@@ -95,7 +97,7 @@ leave(NodeID) ->
 cleanup_state(NodeID)
   when NodeID == node() ->
     plumtree_peer_service_manager:delete_state();
-cleanup_state(NodeID) ->
+cleanup_state(_) ->
     lager:warning("Not deleting state since we're only removing a node").
 
 
