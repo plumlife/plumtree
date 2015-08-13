@@ -617,17 +617,15 @@ init_lets(FullPrefix, DataRoot) ->
     TabName = lets_tabname(FullPrefix),
     FileName = lets_file(DataRoot, FullPrefix),
 
-    Options = [ {filter_policy, {bloom, 16}}
-              , {create_if_missing, true}
-              , {path, FileName}
-              ],
-
     lets:new( TabName
             , [ ordered_set
               , compressed
               , public
               , named_table
-              , {db, Options}
+              , {db, [ {filter_policy, {bloom, 16}}
+                     , {create_if_missing, true}
+                     , {path, FileName}
+                     ]}
               ]),
 
     ets:insert(?ETS, [{FullPrefix, TabName}]),
