@@ -591,7 +591,6 @@ init_manifest(State) ->
               , named_table
               , {db, Options}
               ]),
-    os:cmd("sync"),
     
     {ok, Id}.
 
@@ -630,13 +629,12 @@ init_lets(FullPrefix, DataRoot) ->
               , named_table
               , {db, Options}
               ]),
-    os:cmd("sync"),
+
     ets:insert(?ETS, [{FullPrefix, TabName}]),
     lets_insert(?MANIFEST, [{FullPrefix, TabName, FileName}]).
 
 lets_insert(TabName, Objs) ->
     true = lets:insert(TabName, Objs),
-    os:cmd("sync"),
     ok.
 
 lets_tabname(FullPrefix) -> {?MODULE, FullPrefix}.
