@@ -540,6 +540,7 @@ new_segment_store(Opts, State) ->
                     , compressed
                     , public
                     , {db, Options}
+                    , {db_write, [ {sync, true} ]}
                     ]),
     
     State#state{ref=Ref, path=DataDir}.

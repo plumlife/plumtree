@@ -579,17 +579,20 @@ init_manifest(State) ->
     ManifestFile = filename:join(State#state.data_root, ?MANIFEST_FILENAME),
     ok = filelib:ensure_dir(ManifestFile),
 
-    Options = [ {filter_policy, {bloom, 16}}
-              , {create_if_missing, true}
-              , {path, ManifestFile}
-              ],
-
     Id = lets:new( ?MANIFEST
             , [ ordered_set
               , compressed
               , public
               , named_table
-              , {db, Options}
+              , {db, [ {filter_policy, {bloom, 16}}
+                     , {create_if_missing, true}
+                     , {path, ManifestFile}
+                     ]}
+              , {db_read, [ {verify_checksums, true}
+                          , {fill_cache, true}
+                          ]}
+              , {db_write, [ {sync, true}
+                           ]}
               ]),
     
     {ok, Id}.
@@ -626,6 +629,11 @@ init_lets(FullPrefix, DataRoot) ->
                      , {create_if_missing, true}
                      , {path, FileName}
                      ]}
+              , {db_read, [ {verify_checksums, true}
+                          , {fill_cache, true}
+                          ]}
+              , {db_write, [ {sync, true}
+                           ]}
               ]),
 
     ets:insert(?ETS, [{FullPrefix, TabName}]),
