@@ -57,7 +57,7 @@
 
 -define(SERVER, ?MODULE).
 -define(MANIFEST, cluster_meta_manifest).
--define(MANIFEST_FILENAME, "manifest.dets").
+-define(MANIFEST_FILENAME, "manifest.ldb").
 -define(ETS, metadata_manager_prefixes_ets).
 
 -record(state, {
@@ -336,8 +336,6 @@ init([Opts]) ->
                            data_root=DataRoot,
                            iterators=new_ets_tab()},
             {ok, _} = init_manifest(State),
-            %% TODO: should do this out-of-band from startup so we don't block
-            init_from_files(State),
             {ok, State}
     end.
 
@@ -399,8 +397,7 @@ handle_info({'DOWN', ItRef, process, _Pid, _Reason}, State) ->
 %% @private
 -spec terminate(term(), #state{}) -> term().
 terminate(_Reason, _State) ->
-    close_dets_tabs(),
-    ok = close_manifest().
+    ok.
 
 %% @private
 -spec code_change(term() | {down, term()}, #state{}, term()) -> {ok, #state{}}.
@@ -557,14 +554,13 @@ read_merge_write(PKey, Obj, State) ->
     end.
 
 store({FullPrefix, Key}=PKey, Metadata, State) ->
-    _ = maybe_init_ets(FullPrefix),
-    maybe_init_dets(FullPrefix, State#state.data_root),
+    maybe_init_lets(FullPrefix, State#state.data_root),
 
     Objs = [{Key, Metadata}],
     Hash = plumtree_metadata_object:hash(Metadata),
-    ets:insert(ets_tab(FullPrefix), Objs),
+
     plumtree_metadata_hashtree:insert(PKey, Hash),
-    ok = dets_insert(dets_tabname(FullPrefix), Objs),
+    ok = lets_insert(lets_tabname(FullPrefix), Objs),
     {Metadata, State}.
 
 read({FullPrefix, Key}) ->
@@ -574,7 +570,7 @@ read({FullPrefix, Key}) ->
     end.
 
 read(Key, TabId) ->
-    case ets:lookup(TabId, Key) of
+    case lets:lookup(TabId, Key) of
         [] -> undefined;
         [{Key, MetaRec}] -> MetaRec
     end.
@@ -582,22 +578,22 @@ read(Key, TabId) ->
 init_manifest(State) ->
     ManifestFile = filename:join(State#state.data_root, ?MANIFEST_FILENAME),
     ok = filelib:ensure_dir(ManifestFile),
-    {ok, ?MANIFEST} = dets:open_file(?MANIFEST, [{file, ManifestFile}]).
 
-close_manifest() ->
-    dets:close(?MANIFEST).
+    Options = [ {filter_policy, {bloom, 16}}
+              , {create_if_missing, true}
+              , {path, ManifestFile}
+              ],
 
-init_from_files(State) ->
-    %% TODO: do this in parallel
-    dets_fold_tabnames(fun init_from_file/2, State).
-
-init_from_file(TabName, State) ->
-    FullPrefix = dets_tabname_to_prefix(TabName),
-    FileName = dets_file(State#state.data_root, FullPrefix),
-    {ok, TabName} = dets:open_file(TabName, [{file, FileName}]),
-    TabId = init_ets(FullPrefix),
-    TabId = dets:to_ets(TabName, TabId),
-    State.
+    Id = lets:new( ?MANIFEST
+            , [ ordered_set
+              , compressed
+              , public
+              , named_table
+              , {db, Options}
+              ]),
+    os:cmd("sync"),
+    
+    {ok, Id}.
 
 ets_tab(FullPrefix) ->
     case ets:lookup(?ETS, FullPrefix) of
@@ -605,72 +601,68 @@ ets_tab(FullPrefix) ->
         [{FullPrefix, TabId}] -> TabId
     end.
 
-maybe_init_ets(FullPrefix) ->
-    case ets_tab(FullPrefix) of
-        undefined -> init_ets(FullPrefix);
-        _TabId -> ok
-    end.
-
-init_ets(FullPrefix) ->
-    TabId = new_ets_tab(),
-    ets:insert(?ETS, [{FullPrefix, TabId}]),
-    TabId.
-
 new_ets_tab() ->
     ets:new(undefined, [{read_concurrency, true}, {write_concurrency, true}]).
 
-maybe_init_dets(FullPrefix, DataRoot) ->
-    case dets:info(dets_tabname(FullPrefix)) of
-        undefined -> init_dets(FullPrefix, DataRoot);
-        _ -> ok
+maybe_init_lets(FullPrefix, DataRoot) ->
+    try
+        lets:info(lets_tabname(FullPrefix), name)
+    catch
+        _:badarg -> 
+            init_lets(FullPrefix, DataRoot);
+        _:E ->
+            error(E)
     end.
 
-init_dets(FullPrefix, DataRoot) ->
-    TabName = dets_tabname(FullPrefix),
-    FileName = dets_file(DataRoot, FullPrefix),
-    {ok, TabName} = dets:open_file(TabName, [{file, FileName}]),
-    dets_insert(?MANIFEST, [{FullPrefix, TabName, FileName}]).
+init_lets(FullPrefix, DataRoot) ->
+    TabName = lets_tabname(FullPrefix),
+    FileName = lets_file(DataRoot, FullPrefix),
 
-close_dets_tabs() ->
-    dets_fold_tabnames(fun close_dets_tab/2, undefined).
+    Options = [ {filter_policy, {bloom, 16}}
+              , {create_if_missing, true}
+              , {path, FileName}
+              ],
 
-close_dets_tab(TabName, _Acc) ->
-    dets:close(TabName).
+    lets:new( TabName
+            , [ ordered_set
+              , compressed
+              , public
+              , named_table
+              , {db, Options}
+              ]),
+    os:cmd("sync"),
+    ets:insert(?ETS, [{FullPrefix, TabName}]),
+    lets_insert(?MANIFEST, [{FullPrefix, TabName, FileName}]).
 
-dets_insert(TabName, Objs) ->
-    ok = dets:insert(TabName, Objs),
-    ok = dets:sync(TabName).
+lets_insert(TabName, Objs) ->
+    true = lets:insert(TabName, Objs),
+    os:cmd("sync"),
+    ok.
 
-dets_tabname(FullPrefix) -> {?MODULE, FullPrefix}.
-dets_tabname_to_prefix({?MODULE, FullPrefix}) ->  FullPrefix.
+lets_tabname(FullPrefix) -> {?MODULE, FullPrefix}.
 
-dets_file(DataRoot, FullPrefix) ->
-    filename:join(DataRoot, dets_filename(FullPrefix)).
+lets_file(DataRoot, FullPrefix) ->
+    filename:join(DataRoot, lets_filename(FullPrefix)).
 
-dets_filename({Prefix, SubPrefix}=FullPrefix) ->
-    MD5Prefix = dets_filename_part(Prefix),
-    MD5SubPrefix = dets_filename_part(SubPrefix),
-    Trailer = dets_filename_trailer(FullPrefix),
-    io_lib:format("~s-~s-~s.dets", [MD5Prefix, MD5SubPrefix, Trailer]).
+lets_filename({Prefix, SubPrefix}=FullPrefix) ->
+    MD5Prefix = lets_filename_part(Prefix),
+    MD5SubPrefix = lets_filename_part(SubPrefix),
+    Trailer = lets_filename_trailer(FullPrefix),
+    io_lib:format("~s-~s-~s.ldb", [MD5Prefix, MD5SubPrefix, Trailer]).
 
-dets_filename_part(Part) when is_atom(Part) ->
-    dets_filename_part(list_to_binary(atom_to_list(Part)));
-dets_filename_part(Part) when is_binary(Part) ->
+lets_filename_part(Part) when is_atom(Part) ->
+    lets_filename_part(list_to_binary(atom_to_list(Part)));
+lets_filename_part(Part) when is_binary(Part) ->
     <<MD5Int:128/integer>> = crypto:hash(md5, (Part)),
     integer_to_list(MD5Int, 16).
 
-dets_filename_trailer(FullPrefix) ->
-    [dets_filename_trailer_part(Part) || Part <- tuple_to_list(FullPrefix)].
+lets_filename_trailer(FullPrefix) ->
+    [lets_filename_trailer_part(Part) || Part <- tuple_to_list(FullPrefix)].
 
-dets_filename_trailer_part(Part) when is_atom(Part) ->
+lets_filename_trailer_part(Part) when is_atom(Part) ->
     "1";
-dets_filename_trailer_part(Part) when is_binary(Part)->
+lets_filename_trailer_part(Part) when is_binary(Part)->
     "0".
-
-dets_fold_tabnames(Fun, Acc0) ->
-    dets:foldl(fun({_FullPrefix, TabName, _FileName}, Acc) ->
-                       Fun(TabName, Acc)
-               end, Acc0, ?MANIFEST).
 
 data_root(Opts) ->
     case proplists:get_value(data_dir, Opts) of

@@ -92,11 +92,13 @@ leave(NodeID) ->
             end;
         {error, singleton} ->
             lager:warning("Cannot leave, not a member of a cluster.")
-    end.
+    end,
+    ok.
 
 cleanup_state(NodeID)
   when NodeID == node() ->
-    plumtree_peer_service_manager:delete_state();
+    plumtree_peer_service_manager:delete_state(),
+    application:stop(plumtree);
 cleanup_state(_) ->
     lager:warning("Not deleting state since we're only removing a node").
 
@@ -132,8 +134,6 @@ stop() ->
 stop(Reason) ->
     lager:notice("~p", [Reason]),
     init:stop().
-
-
 
 random_peer(Leave) ->
     Members = riak_dt_orswot:value(Leave),
