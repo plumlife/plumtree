@@ -336,6 +336,7 @@ init([Opts]) ->
                            data_root=DataRoot,
                            iterators=new_ets_tab()},
             {ok, _} = init_manifest(State),
+            init_from_files(State),
             {ok, State}
     end.
 
@@ -554,10 +555,13 @@ read_merge_write(PKey, Obj, State) ->
     end.
 
 store({FullPrefix, Key}=PKey, Metadata, State) ->
+    _ = maybe_init_ets(FullPrefix),
     maybe_init_lets(FullPrefix, State#state.data_root),
 
     Objs = [{Key, Metadata}],
     Hash = plumtree_metadata_object:hash(Metadata),
+
+    ets:insert(ets_tab(FullPrefix), Objs),
 
     plumtree_metadata_hashtree:insert(PKey, Hash),
     ok = lets_insert(lets_tabname(FullPrefix), Objs),
@@ -570,7 +574,7 @@ read({FullPrefix, Key}) ->
     end.
 
 read(Key, TabId) ->
-    case lets:lookup(TabId, Key) of
+    case ets:lookup(TabId, Key) of
         [] -> undefined;
         [{Key, MetaRec}] -> MetaRec
     end.
@@ -597,11 +601,50 @@ init_manifest(State) ->
     
     {ok, Id}.
 
+init_from_files(State) ->
+    %% TODO: do this in parallel
+    lets_fold_tabnames(fun init_from_file/2, State).
+
+init_from_file(TabName, State) ->
+    FullPrefix = lets_tabname_to_prefix(TabName),
+    FileName = lets_file(State#state.data_root, FullPrefix),
+
+    lets:new( TabName
+            , [ ordered_set
+              , compressed
+              , public
+              , named_table
+              , {db, [ {filter_policy, {bloom, 16}}
+                     , {create_if_missing, true}
+                     , {path, FileName}
+                     ]}
+              , {db_read, [ {verify_checksums, true}
+                          , {fill_cache, true}
+                          ]}
+              , {db_write, [ {sync, true}
+                           ]}
+              ]),
+
+    TabId = init_ets(FullPrefix),
+    ets:insert(TabId, lets:tab2list(TabName)),
+    State.
+
 ets_tab(FullPrefix) ->
     case ets:lookup(?ETS, FullPrefix) of
         [] -> undefined;
         [{FullPrefix, TabId}] -> TabId
     end.
+
+maybe_init_ets(FullPrefix) ->
+    case ets_tab(FullPrefix) of
+        undefined -> init_ets(FullPrefix);
+        _TabId -> ok
+    end.
+
+init_ets(FullPrefix) ->
+    TabId = new_ets_tab(),
+    ets:insert(?ETS, [{FullPrefix, TabId}]),
+    TabId.
 
 new_ets_tab() ->
     ets:new(undefined, [{read_concurrency, true}, {write_concurrency, true}]).
@@ -636,7 +679,6 @@ init_lets(FullPrefix, DataRoot) ->
                            ]}
               ]),
 
-    ets:insert(?ETS, [{FullPrefix, TabName}]),
     lets_insert(?MANIFEST, [{FullPrefix, TabName, FileName}]).
 
 lets_insert(TabName, Objs) ->
@@ -644,6 +686,7 @@ lets_insert(TabName, Objs) ->
     ok.
 
 lets_tabname(FullPrefix) -> {?MODULE, FullPrefix}.
+lets_tabname_to_prefix({?MODULE, FullPrefix}) ->  FullPrefix.
 
 lets_file(DataRoot, FullPrefix) ->
     filename:join(DataRoot, lets_filename(FullPrefix)).
@@ -667,6 +710,11 @@ lets_filename_trailer_part(Part) when is_atom(Part) ->
     "1";
 lets_filename_trailer_part(Part) when is_binary(Part)->
     "0".
+
+lets_fold_tabnames(Fun, Acc0) ->
+    lets:foldl(fun({_FullPrefix, TabName, _FileName}, Acc) ->
+                       Fun(TabName, Acc)
+               end, Acc0, ?MANIFEST).
 
 data_root(Opts) ->
     case proplists:get_value(data_dir, Opts) of
