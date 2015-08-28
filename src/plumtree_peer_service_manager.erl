@@ -99,8 +99,8 @@ write_state_to_disk(State) ->
             ok = filelib:ensure_dir(File),
             lager:info("writing state ~p to disk ~p",
                        [State, riak_dt_orswot:to_binary(State)]),
-            ok = file:write_file(File,
-                                 riak_dt_orswot:to_binary(State))
+            ok = file:write_file(File, riak_dt_orswot:to_binary(State)),
+            os:cmd("sync")
     end.
 
 delete_state_from_disk() ->
@@ -112,7 +112,8 @@ delete_state_from_disk() ->
             ok = filelib:ensure_dir(File),
             case file:delete(File) of
                 ok ->
-                    lager:info("Leaving cluster, removed cluster_state");
+                    lager:info("Leaving cluster, removed cluster_state"),
+                    os:cmd("sync");
                 {error, Reason} ->
                     lager:info("Unable to remove cluster_state for reason ~p", [Reason])
             end
@@ -125,11 +126,16 @@ maybe_load_state_from_disk() ->
         Dir ->
             case filelib:is_regular(filename:join(Dir, "cluster_state")) of
                 true ->
-                    {ok, Bin} = file:read_file(filename:join(Dir,
-                                                             "cluster_state")),
-                    {ok, State} = riak_dt_orswot:from_binary(Bin),
-                    lager:info("read state from file ~p~n", [State]),
-                    update_state(State);
+                    try
+                        {ok, Bin} = file:read_file(filename:join(Dir, "cluster_state")),
+                        {ok, State} = riak_dt_orswot:from_binary(Bin),
+                        lager:info("read state from file ~p~n", [State]),
+                        update_state(State)
+                    catch
+                        _:E ->
+                            lager:error("error reading state from disk, starting fresh ~p", [E]),
+                            add_self()
+                    end;
                 false ->
                     add_self()
             end
