@@ -25,10 +25,9 @@
 -export([init/0, get_local_state/0, get_actor/0, update_state/1, delete_state/0]).
 
 init() ->
-    %% Setup ETS and LETS table for cluster_state
+    %% setup ETS table for cluster_state
     _ = try ets:new(?TBL, [named_table, public, set, {keypos, 1}]) of
             _Res ->
-                create_lets_table(),
                 gen_actor(),
                 maybe_load_state_from_disk(),
                 ok
@@ -38,30 +37,6 @@ init() ->
                 %%TODO rejoin logic
         end,
     ok.
-
-create_lets_table() ->
-    case data_root() of
-        undefined ->
-            ok;
-        Dir ->
-            Path = filename:join(Dir, "cluster_state"),
-            ok = filelib:ensure_dir(Path),
-            lets:new( cluster_state_lvldb
-                    , [ ordered_set
-                      , compressed
-                      , public
-                      , named_table
-                      , {db, [ {filter_policy, {bloom, 16}}
-                             , {create_if_missing, true}
-                             , {path, Path}
-                             ]}
-                      , {db_read, [ {verify_checksums, true}
-                                  , {fill_cache, true}
-                                  ]}
-                      , {db_write, [ {sync, true}
-                                   ]}
-                      ])
-    end.
 
 %% @doc return local node's view of cluster membership
 get_local_state() ->
@@ -122,9 +97,10 @@ write_state_to_disk(State) ->
         Dir ->
             File = filename:join(Dir, "cluster_state"),
             ok = filelib:ensure_dir(File),
-            lager:info("flushing cluster state ~p to disk ~p",
+            lager:info("writing state ~p to disk ~p",
                        [State, riak_dt_orswot:to_binary(State)]),
-            lets:insert(cluster_state_lvldb, {peer_state, State})
+            ok = file:write_file(File, riak_dt_orswot:to_binary(State)),
+            os:cmd("sync")
     end.
 
 delete_state_from_disk() ->
@@ -132,7 +108,15 @@ delete_state_from_disk() ->
         undefined ->
             ok;
         Dir ->
-            lets:delete(cluster_state_lvldb)
+            File = filename:join(Dir, "cluster_state"),
+            ok = filelib:ensure_dir(File),
+            case file:delete(File) of
+                ok ->
+                    lager:info("Leaving cluster, removed cluster_state"),
+                    os:cmd("sync");
+                {error, Reason} ->
+                    lager:info("Unable to remove cluster_state for reason ~p", [Reason])
+            end
     end.
 
 maybe_load_state_from_disk() ->
@@ -142,16 +126,17 @@ maybe_load_state_from_disk() ->
         Dir ->
             case filelib:is_regular(filename:join(Dir, "cluster_state")) of
                 true ->
-                    State = lookup_state(),
-                    lager:info("read state from file ~p~n", [State]),
-                    update_state(State);
+                    try
+                        {ok, Bin} = file:read_file(filename:join(Dir, "cluster_state")),
+                        {ok, State} = riak_dt_orswot:from_binary(Bin),
+                        lager:info("read state from file ~p~n", [State]),
+                        update_state(State)
+                    catch
+                        _:E ->
+                            lager:error("error reading state from disk, starting fresh ~p", [E]),
+                            add_self()
+                    end;
                 false ->
                     add_self()
             end
-    end.
-
-lookup_state() ->
-    case lets:lookup(cluster_state_lvldb, peer_state) of
-        [{peer_state, State}|_] -> State;
-        []                      -> riak_dt_orswot:new()
     end.
