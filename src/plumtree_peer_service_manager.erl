@@ -211,8 +211,8 @@ get_actor_from_state() ->
 %% @doc generate an actor for this node while alive
 gen_actor() ->
     Node = atom_to_list(node()),
-    {M, S, U} = now(),
-    TS = integer_to_list(M * 1000 * 1000 * 1000 * 1000 + S * 1000 * 1000 + U),
+    Unique = erlang:unique_integer([positive]),
+    TS = integer_to_list(Unique),
     Term = Node ++ TS,
     Actor = crypto:hash(sha, Term),
     lets:insert(?TBL, {actor, Actor}),
