@@ -25,22 +25,35 @@
 -export([init/0, get_local_state/0, get_actor/0, update_state/1, delete_state/0]).
 
 init() ->
-    %% setup ETS table for cluster_state
-    _ = try ets:new(?TBL, [named_table, public, set, {keypos, 1}]) of
-            _Res ->
-                gen_actor(),
-                maybe_load_state_from_disk(),
-                ok
-        catch
-            error:badarg ->
-                lager:warning("Table ~p already exists", [?TBL])
-                %%TODO rejoin logic
-        end,
+    %% Setup ETS table for cluster_state
+    DBPath = data_root(),
+    case filelib:is_dir(DBPath) of
+        true  -> initialize_lets(DBPath);
+        false ->
+            initialize_lets(DBPath),
+            add_self()
+    end,
+
+    migrate_old_flatfile(),
+
     ok.
+
+initialize_lets(Path) ->
+    lets:new( cluster_state
+            , [ set
+              , compressed
+              , public
+              , named_table
+              , {db, [ {filter_policy, {bloom, 16}}
+                     , {create_if_missing, true}
+                     , {path, Path}
+                     ]}
+              , {db_write, [ {sync, true} ]}
+              ]).
 
 %% @doc return local node's view of cluster membership
 get_local_state() ->
-   case hd(ets:lookup(?TBL, cluster_state)) of
+   case hd(lets:lookup(?TBL, cluster_state)) of
        {cluster_state, State} ->
            {ok, State};
        _Else ->
@@ -49,17 +62,20 @@ get_local_state() ->
 
 %% @doc return local node's current actor
 get_actor() ->
-    case hd(ets:lookup(?TBL, actor)) of
-        {actor, Actor} ->
-            {ok, Actor};
-        _Else ->
-            {error, _Else}
+    try
+        case hd(lets:lookup(?TBL, actor)) of
+            {actor, Actor} ->
+                {ok, Actor};
+            _Else ->
+                {error, _Else}
+        end
+    catch
+        _:E -> {error, E}
     end.
 
 %% @doc update cluster_state
 update_state(State) ->
-    write_state_to_disk(State),
-    ets:insert(?TBL, {cluster_state, State}).
+    lets:insert(?TBL, {cluster_state, State}).
 
 delete_state() ->
     delete_state_from_disk().
@@ -71,7 +87,12 @@ delete_state() ->
 %% @doc initialize singleton cluster
 add_self() ->
     Initial = riak_dt_orswot:new(),
-    Actor = ets:lookup(?TBL, actor),
+
+    Actor = case get_actor() of
+        {ok, A}    -> A;
+        {error, _} -> gen_actor()
+    end,
+
     {ok, LocalState} = riak_dt_orswot:update({add, node()}, Actor, Initial),
     update_state(LocalState). 
 
@@ -82,61 +103,53 @@ gen_actor() ->
     TS = integer_to_list(M * 1000 * 1000 * 1000 * 1000 + S * 1000 * 1000 + U),
     Term = Node ++ TS,
     Actor = crypto:hash(sha, Term),
-    ets:insert(?TBL, {actor, Actor}).
+    lets:insert(?TBL, {actor, Actor}),
+    Actor.
 
 data_root() ->
     case application:get_env(plumtree, plumtree_data_dir) of
-        {ok, PRoot} -> filename:join(PRoot, "peer_service");
-        undefined -> undefined
-    end.
-
-write_state_to_disk(State) ->
-    case data_root() of
-        undefined ->
-            ok;
-        Dir ->
-            File = filename:join(Dir, "cluster_state"),
-            ok = filelib:ensure_dir(File),
-            lager:info("writing state ~p to disk ~p",
-                       [State, riak_dt_orswot:to_binary(State)]),
-            ok = file:write_file(File, riak_dt_orswot:to_binary(State)),
-            os:cmd("sync")
+        {ok, PRoot} -> 
+            Dir = filename:join(PRoot, "peer_service"),
+            filelib:ensure_dir(Dir),
+            Dir;
+        undefined   -> 
+            {ok, Dir} = file:get_cwd(),
+            NewDir = filename:join(Dir, "peer_service"),
+            filelib:ensure_dir(NewDir),
+            NewDir
     end.
 
 delete_state_from_disk() ->
-    case data_root() of 
-        undefined ->
-            ok;
-        Dir ->
-            File = filename:join(Dir, "cluster_state"),
-            ok = filelib:ensure_dir(File),
-            case file:delete(File) of
-                ok ->
-                    lager:info("Leaving cluster, removed cluster_state"),
-                    os:cmd("sync");
-                {error, Reason} ->
-                    lager:info("Unable to remove cluster_state for reason ~p", [Reason])
-            end
-    end.
+    os:cmd("rm -rf " ++ data_root() ++ " && sync").
 
-maybe_load_state_from_disk() ->
-    case data_root() of
+%%% ------------------------------------------------------------------
+%%% OLD FUNCTIONS FOR BACKWARDS COMPAT
+%%% ------------------------------------------------------------------
+
+migrate_old_flatfile() ->
+    case old_data_root() of
         undefined ->
-            add_self();
+            void;
         Dir ->
             case filelib:is_regular(filename:join(Dir, "cluster_state")) of
                 true ->
-                    try
-                        {ok, Bin} = file:read_file(filename:join(Dir, "cluster_state")),
-                        {ok, State} = riak_dt_orswot:from_binary(Bin),
-                        lager:info("read state from file ~p~n", [State]),
-                        update_state(State)
-                    catch
-                        _:E ->
-                            lager:error("error reading state from disk, starting fresh ~p", [E]),
-                            add_self()
-                    end;
+                    {ok, Bin} = file:read_file(filename:join(Dir,
+                                                             "cluster_state")),
+                    {ok, State} = riak_dt_orswot:from_binary(Bin),
+                    lager:info("read state from file, migrating...", [State]),
+
+                    %% Remove the old cluster state file
+                    os:cmd("rm -f " ++ filename:join(Dir, "cluster_state") ++ " && sync"),
+
+                    %% Update our leveldb backed cluster state with what we imported
+                    update_state(State);
                 false ->
-                    add_self()
+                    void
             end
+    end.
+
+old_data_root() ->
+    case application:get_env(plumtree, plumtree_data_dir) of
+        {ok, PRoot} -> filename:join(PRoot, "peer_service");
+        undefined -> undefined
     end.
