@@ -136,7 +136,7 @@ migrate_old_flatfile() ->
                     {ok, Bin} = file:read_file(filename:join(Dir,
                                                              "cluster_state")),
                     {ok, State} = riak_dt_orswot:from_binary(Bin),
-                    lager:info("read state from file, migrating...", [State]),
+                    lager:info("read state from file, migrating..."),
 
                     %% Remove the old cluster state file
                     os:cmd("rm -f " ++ filename:join(Dir, "cluster_state") ++ " && sync"),
