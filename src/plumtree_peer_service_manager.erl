@@ -49,7 +49,8 @@ initialize_lets(Path) ->
                      , {path, Path}
                      ]}
               , {db_write, [ {sync, true} ]}
-              ]).
+              ]),
+    gen_actor().
 
 %% @doc return local node's view of cluster membership
 get_local_state() ->
