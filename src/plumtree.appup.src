@@ -1,12 +1,10 @@
-{"0.1.1",
-  [{"0.1.0",
-    [ {update, plumtree_metadata_exchange_fsm}
-    , {update, plumtree_broadcast}
+{"0.2.0",
+  [{"0.1.1",
+    [ {restart_application, plumtree}
     ]}
   ],
-  [{"0.1.0",
-    [ {update, plumtree_broadcast}
-    , {update, plumtree_metadata_exchange_fsm}
+  [{"0.1.1",
+    [ {restart_application, plumtree}
     ]}
   ]
 }.

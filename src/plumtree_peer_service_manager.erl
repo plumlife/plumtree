@@ -22,21 +22,134 @@
 
 -define(TBL, cluster_state).
 
--export([init/0, get_local_state/0, get_actor/0, update_state/1, delete_state/0]).
+-behaviour(gen_server).
 
-init() ->
-    %% Setup ETS table for cluster_state
+%% API
+-export([start_link/0,
+         get_local_state/0,
+         get_actor/0,
+         update_state/1,
+         members/0,
+         delete_state/0]).
+
+%% gen_server callbacks
+-export([init/1,
+         handle_call/3,
+         handle_cast/2,
+         handle_info/2,
+         terminate/2,
+         code_change/3]).
+
+-record(state, {}).
+
+%%%===================================================================
+%%% API
+%%%===================================================================
+
+%% @doc Same as start_link([]).
+-spec start_link() -> {ok, pid()} | ignore | {error, term()}.
+start_link() ->
+    gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
+
+%% @doc Return local node's view of cluster membership.
+get_local_state() ->
+    gen_server:call(?MODULE, get_local_state, infinity).
+
+%% @doc Return local node's current actor.
+get_actor() ->
+    gen_server:call(?MODULE, get_actor, infinity).
+
+%% @doc Update cluster state.
+update_state(State) ->
+    gen_server:call(?MODULE, {update_state, State}, infinity).
+
+%% @doc Delete state.
+delete_state() ->
+    gen_server:call(?MODULE, delete_state, infinity).
+
+%% @doc Fetch local member set.
+members() ->
+    gen_server:call(?MODULE, members, infinity).
+
+%%%===================================================================
+%%% gen_server callbacks
+%%%===================================================================
+
+%% @private
+-spec init([]) -> {ok, #state{}}.
+init([]) ->
+    %% Initialize lets table for cluster_state
     DBPath = data_root(),
     case filelib:is_dir(DBPath) of
         true  -> initialize_lets(DBPath);
         false ->
             initialize_lets(DBPath),
-            add_self()
+            empty_membership()
     end,
 
     migrate_old_flatfile(),
 
+    {ok, #state{}}.
+
+%% @private
+-spec handle_call(term(), {pid(), term()}, #state{}) -> {reply, term(), #state{}}.
+handle_call(get_local_state, _From, State) ->
+    Result = fetch_state(),
+    {reply, Result, State};
+handle_call(get_actor, _From, State) ->
+    Result = get_actor_from_state(),
+    {reply, Result, State};
+handle_call({update_state, NewState}, _From, State) ->
+    update_local_state(NewState),
+    {reply, ok, State};
+handle_call(delete_state, _From, State) ->
+    delete_state_from_disk(),
+    {reply, ok, State};
+handle_call(members, _From, State) ->
+    {ok, Result} = fetch_state(),
+    Set = riak_dt_orswot:value(Result),
+    {reply, Set, State};
+handle_call(Msg, _From, State) ->
+    lager:warning("Unhandled messages: ~p", [Msg]),
+    {reply, ok, State}.
+
+%% @private
+-spec handle_cast(term(), #state{}) -> {noreply, #state{}}.
+handle_cast(Msg, State) ->
+    lager:warning("Unhandled messages: ~p", [Msg]),
+    {noreply, State}.
+
+%% @private
+-spec handle_info(term(), #state{}) -> {noreply, #state{}}.
+handle_info(Msg, State) ->
+    lager:warning("Unhandled messages: ~p", [Msg]),
+    {noreply, State}.
+
+%% @private
+-spec terminate(term(), #state{}) -> term().
+terminate(_Reason, _State) ->
     ok.
+
+%% @private
+-spec code_change(term() | {down, term()}, #state{}, term()) -> {ok, #state{}}.
+code_change(_OldVsn, State, _Extra) ->
+    {ok, State}.
+
+%%%===================================================================
+%%% Internal functions
+%%%===================================================================
+
+fetch_state() ->
+    try
+        case hd(lets:lookup(?TBL, cluster_state)) of
+            {cluster_state, State} ->
+                {ok, State};
+            _Else ->
+                {error, _Else}
+        end
+    catch
+        _:_ -> {ok, riak_dt_orswot:new()}
+    end.
 
 initialize_lets(Path) ->
     lets:new( cluster_state
@@ -52,17 +165,38 @@ initialize_lets(Path) ->
               ]),
     gen_actor().
 
-%% @doc return local node's view of cluster membership
-get_local_state() ->
-   case hd(lets:lookup(?TBL, cluster_state)) of
-       {cluster_state, State} ->
-           {ok, State};
-       _Else ->
-           {error, _Else}
-   end.
+%%%===================================================================
+%%% internal functions
+%%%===================================================================
 
-%% @doc return local node's current actor
-get_actor() ->
+update_local_state(NewState) ->
+    %% Ensure that incoming state is always merged with the state
+    %% stored at the peer service; otherwise, you run the risk of a
+    %% slow client reading and writing and dropping an update if
+    %% clients race to update state.
+    %% 
+    %% This ensures a partial order relationship between updates at a
+    %% given node where all updates subsume previous updates; partial
+    %% order induced by <= over set containment.
+
+    {ok, LocalState} = fetch_state(),
+    riak_dt_orswot:merge(LocalState, NewState),
+    lets:insert(?TBL, {cluster_state, NewState}),
+    ok.
+
+%% @doc initialize singleton cluster
+empty_membership() ->
+    Initial = riak_dt_orswot:new(),
+
+    Actor = case get_actor_from_state() of
+        {ok, A}    -> A;
+        {error, _} -> gen_actor()
+    end,
+
+    {ok, LocalState} = riak_dt_orswot:update({add, node()}, Actor, Initial),
+    update_local_state(LocalState). 
+
+get_actor_from_state() ->
     try
         case hd(lets:lookup(?TBL, actor)) of
             {actor, Actor} ->
@@ -73,29 +207,6 @@ get_actor() ->
     catch
         _:E -> {error, E}
     end.
-
-%% @doc update cluster_state
-update_state(State) ->
-    lets:insert(?TBL, {cluster_state, State}).
-
-delete_state() ->
-    delete_state_from_disk().
-
-%%% ------------------------------------------------------------------
-%%% internal functions
-%%% ------------------------------------------------------------------
-
-%% @doc initialize singleton cluster
-add_self() ->
-    Initial = riak_dt_orswot:new(),
-
-    Actor = case get_actor() of
-        {ok, A}    -> A;
-        {error, _} -> gen_actor()
-    end,
-
-    {ok, LocalState} = riak_dt_orswot:update({add, node()}, Actor, Initial),
-    update_state(LocalState). 
 
 %% @doc generate an actor for this node while alive
 gen_actor() ->
@@ -123,10 +234,9 @@ data_root() ->
 delete_state_from_disk() ->
     os:cmd("rm -rf " ++ data_root() ++ " && sync").
 
-%%% ------------------------------------------------------------------
+%%%===================================================================
 %%% OLD FUNCTIONS FOR BACKWARDS COMPAT
-%%% ------------------------------------------------------------------
-
+%%%===================================================================
 migrate_old_flatfile() ->
     case old_data_root() of
         undefined ->
