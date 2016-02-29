@@ -248,7 +248,8 @@ close(State) ->
     State#state{snapshot=undefined}.
 
 -spec destroy(string() | hashtree()) -> boolean() | hashtree().
-destroy(Name) when is_list(Name) ->
+destroy(Path) when is_list(Path) ->
+    Name = filename:basename(Path),
     lager:debug("destroying tab name: ~p", [Name]),
     Tabs = lets:all(),
     TabNames = lists:map(fun(T) -> {lets:info(T, name), T} end, Tabs),
