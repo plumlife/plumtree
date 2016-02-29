@@ -495,7 +495,7 @@ set_bucket(Level, Bucket, Val, State) ->
     end.
 
 -spec new_segment_store(proplist(), hashtree()) -> hashtree().
-new_segment_store(Opts, State) ->
+new_segment_store(_, State) ->
     Root = "/tmp/anti/level",
     <<P:128/integer>> = md5(term_to_binary({erlang:now(), make_ref()})),
     DataDir = filename:join(Root, integer_to_list(P)),
