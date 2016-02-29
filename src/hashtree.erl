@@ -249,6 +249,7 @@ close(State) ->
 
 -spec destroy(string() | hashtree()) -> boolean() | hashtree().
 destroy(Name) when is_list(Name) ->
+    lager:debug("destroying tab name: ~p", [Name]),
     Tabs = lets:all(),
     TabNames = lists:map(fun(T) -> {lets:info(T, name), T} end, Tabs),
     
