@@ -249,17 +249,8 @@ close(State) ->
 
 -spec destroy(string() | hashtree()) -> boolean() | hashtree().
 destroy(Path) when is_list(Path) ->
-    Name = filename:basename(Path),
-    lager:debug("destroying tab name: ~p", [Name]),
-    Tabs = lets:all(),
-    TabNames = lists:map(fun(T) -> {lets:info(T, name), T} end, Tabs),
-    
-    case proplists:lookup(filename:basename(Name), TabNames) of
-        none ->
-            lager:notice("No tab is opened by that name");
-        {_, Tab} ->
-            lets:delete(Tab)
-    end;
+    lager:debug("destroying hashtree: ~p", ["/tmp/anti/level"]),
+    os:cmd("rm -rf /tmp/anti/level");
 destroy(State) ->
     %% Assumption: close was already called on all hashtrees that
     %%             use this LevelDB instance,
@@ -505,14 +496,9 @@ set_bucket(Level, Bucket, Val, State) ->
 
 -spec new_segment_store(proplist(), hashtree()) -> hashtree().
 new_segment_store(Opts, State) ->
-    DataDir = case proplists:get_value(segment_path, Opts) of
-                  undefined ->
-                      Root = "/tmp/anti/level",
-                      <<P:128/integer>> = md5(term_to_binary({erlang:now(), make_ref()})),
-                      filename:join(Root, integer_to_list(P));
-                  SegmentPath ->
-                      SegmentPath
-              end,
+    Root = "/tmp/anti/level",
+    <<P:128/integer>> = md5(term_to_binary({erlang:now(), make_ref()})),
+    DataDir = filename:join(Root, integer_to_list(P)),
 
     DefaultWriteBufferMin = 4 * 1024 * 1024,
     DefaultWriteBufferMax = 14 * 1024 * 1024,
