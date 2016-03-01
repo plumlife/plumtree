@@ -715,11 +715,16 @@ multi_select_segment(#state{id=Id, snapshot=Snap}, Segments, F) ->
                      segment_acc=[],
                      final_acc=[]},
 
-    %% Convert from using the iterate function explicitly to using it
-    %% in a folding function
+    Seek = case First of
+               '*' ->
+                   encode(Id, 0, <<>>);
+               _ ->
+                   encode(Id, First, <<>>)
+           end,
+
     IS2 = case Snap of
               undefined -> IS1;
-              Snapshot  -> lists:foldl(fun iterate/2, IS1, Snapshot)
+              Snapshot  -> iterate(iterator_move(Snapshot, Seek), IS1)
     end,
 
     %%IS2 = iterate(iterator_move(Snap, Seek), IS1),
@@ -745,28 +750,47 @@ multi_select_segment(#state{id=Id, snapshot=Snap}, Segments, F) ->
 %%
 %% Technically, this would also need to be done if a dets backend were
 %% used instead of lets.
--spec iterator_move('undefined' | list(), any()) -> {'error', 'invalid_iterator'} | {'ok', any, any()}.
-iterator_move(undefined, _Seek) ->
+%%-spec iterator_move('undefined' | list(), any()) -> {'error', 'invalid_iterator'} | {'ok', any, any()}.
+iterator_move(Snap, Key) ->
+    iterator_move(Snap, 0, Key).
+
+iterator_move(undefined, _Pos, _Seek) ->
     {error, invalid_iterator};
-iterator_move(Snap, Seek) ->
-    case lists:keyfind(Seek, 1, Snap) of
-        {Key, Binary} -> 
-            {ok, Key, Binary};
-        false ->
+
+iterator_move(Snap, Pos, prefetch) ->
+    {Key, Binary} = lists:nth(Pos+1, Snap),
+    {ok, Key, Binary};
+
+iterator_move(Snap, Pos, prefetch_stop) ->
+    {Key, Binary} = lists:nth(Pos+1, Snap),
+    {ok, Key, Binary};
+        
+%% Random seek, no need to track position (though we do want to return
+%% it)
+iterator_move(Snap, _Pos, Seek) ->
+    case keyfindindex(Seek, Snap) of
+        {Idx, Key, Binary} -> 
+            {ok, Idx, Key, Binary};
+        not_found ->
             {error, invalid_iterator}
     end.
+
+keyfindindex(Item, List) -> keyfindindex(Item, List, 1).
+keyfindindex(_,    [],       _)          -> not_found;
+keyfindindex(Item, [{Item, V}|_], Index) -> {Index, Item, V};
+keyfindindex(Item, [_|Tl],   Index)      -> keyfindindex(Item, Tl, Index+1).
 
 -spec iterate({'error','invalid_iterator'} | {binary(),binary()},
               #itr_state{}) -> #itr_state{}.
 iterate({error, invalid_iterator}, IS=#itr_state{}) ->
     IS;
-iterate({K, V}, IS=#itr_state{snapshot=Snap,
-                              id=Id,
-                              current_segment=CurSeg,
-                              remaining_segments=Segments,
-                              acc_fun=F,
-                              segment_acc=Acc,
-                              final_acc=FinalAcc}) ->
+iterate({ok, Pos, K, V}, IS=#itr_state{snapshot=Snap,
+                                       id=Id,
+                                       current_segment=CurSeg,
+                                       remaining_segments=Segments,
+                                       acc_fun=F,
+                                       segment_acc=Acc,
+                                       final_acc=FinalAcc}) ->
 
     {SegId, Seg, _} = safe_decode(K),
     Segment = case CurSeg of
@@ -781,48 +805,55 @@ iterate({K, V}, IS=#itr_state{snapshot=Snap,
             IS;
         {Id, Segment, _, _} ->
             %% Still reading existing segment
-            IS#itr_state{current_segment=Segment,
-                         segment_acc=[{K,V} | Acc],
-                         prefetch=true};
+            IS2 = IS#itr_state{current_segment=Segment,
+                               segment_acc=[{K,V} | Acc],
+                               prefetch=true},
+            iterate(iterator_move(Snap, Pos, prefetch), IS2);
         {Id, _, [Seg|Remaining], _} ->
             %% Pointing at next segment we are interested in
-            IS#itr_state{current_segment=Seg,
-                         remaining_segments=Remaining,
-                         segment_acc=[{K,V}],
-                         final_acc=[{Segment, F(Acc)} | FinalAcc],
-                         prefetch=true};
+            IS2 = IS#itr_state{current_segment=Seg,
+                               remaining_segments=Remaining,
+                               segment_acc=[{K,V}],
+                               final_acc=[{Segment, F(Acc)} | FinalAcc],
+                               prefetch=true},
+            iterate(iterator_move(Snap, Pos, prefetch), IS2);
         {Id, _, ['*'], _} ->
             %% Pointing at next segment we are interested in
-            IS#itr_state{current_segment=Seg,
-                         remaining_segments=['*'],
-                         segment_acc=[{K,V}],
-                         final_acc=[{Segment, F(Acc)} | FinalAcc],
-                         prefetch=true};
+            IS2 = IS#itr_state{current_segment=Seg,
+                               remaining_segments=['*'],
+                               segment_acc=[{K,V}],
+                               final_acc=[{Segment, F(Acc)} | FinalAcc],
+                               prefetch=true},
+            iterate(iterator_move(Snap, Pos, prefetch), IS2);
         {Id, NextSeg, [NextSeg|Remaining], _} ->
             %% A previous prefetch_stop left us at the start of the
             %% next interesting segment.
-            IS#itr_state{current_segment=NextSeg,
-                         remaining_segments=Remaining,
-                         segment_acc=[{K,V}],
-                         prefetch=true};
+            IS2 = IS#itr_state{current_segment=NextSeg,
+                               remaining_segments=Remaining,
+                               segment_acc=[{K,V}],
+                               prefetch=true},
+            iterate(iterator_move(Snap, Pos, prefetch), IS2);
         {Id, _, [_NextSeg | _Remaining], true} ->
             %% Pointing at uninteresting segment, but need to halt the
             %% prefetch to ensure the interator can be reused
-            IS#itr_state{segment_acc=[],
-                         final_acc=[{Segment, F(Acc)} | FinalAcc],
-                         prefetch=false};
+            IS2 = IS#itr_state{segment_acc=[],
+                               final_acc=[{Segment, F(Acc)} | FinalAcc],
+                               prefetch=false},
+            iterate(iterator_move(Snap, Pos, prefetch_stop), IS2);            
         {Id, _, [NextSeg | Remaining], false} ->
             %% Pointing at uninteresting segment, seek to next interesting one
-            IS#itr_state{current_segment=NextSeg,
-                         remaining_segments=Remaining,
-                         segment_acc=[],
-                         final_acc=[{Segment, F(Acc)} | FinalAcc]};
+            Seek = encode(Id, NextSeg, <<>>),
+            IS2 = IS#itr_state{current_segment=NextSeg,
+                               remaining_segments=Remaining,
+                               segment_acc=[],
+                               final_acc=[{Segment, F(Acc)} | FinalAcc]},
+            iterate(iterator_move(Snap, Pos, Seek), IS2);
         {_, _, _, true} ->
             %% Done with traversal, but need to stop the prefetch to
             %% ensure the iterator can be reused. The next operation
             %% with this iterator is a seek so no need to be concerned
             %% with the data returned here.
-            _ = iterator_move(Snap, prefetch_stop),
+            _ = iterator_move(Snap, Pos, prefetch_stop),
             IS#itr_state{prefetch=false};
         {_, _, _, false} ->
             %% Done with traversal
@@ -852,7 +883,9 @@ compare_segments(Segment, Tree=#state{id=Id}, Remote) ->
     KeyHashes2 = Remote(key_hashes, Segment),
     HL1 = orddict:from_list(KeyHashes1),
     HL2 = orddict:from_list(KeyHashes2),
+
     Delta = orddict_delta(HL1, HL2),
+
     Keys = [begin
                 {Id, Segment, Key} = decode(KBin),
                 Type = key_diff_type(Diff),
