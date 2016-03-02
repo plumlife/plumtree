@@ -151,6 +151,7 @@ exchange(timeout, State=#state{peer=Peer}) ->
                  end,
     Res = plumtree_metadata_hashtree:compare(RemoteFun, HandlerFun,
                                               #exchange{local=0,remote=0,keys=0}),
+
     #exchange{local=LocalPrefixes,
               remote=RemotePrefixes,
               keys=Keys} = Res,
