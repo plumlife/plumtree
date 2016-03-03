@@ -126,6 +126,7 @@
          mem_levels/1]).
 
 -ifdef(TEST).
+-compile(export_all).
 -export([local_compare/2]).
 -export([run_local/0,
          run_local/1,
@@ -249,14 +250,10 @@ close(State) ->
 
 -spec destroy(string() | hashtree()) -> boolean() | hashtree().
 destroy(Name) when is_list(Name) ->
-    Tabs = lets:all(),
-    TabNames = lists:map(fun(T) -> {lets:info(T, name), T} end, Tabs),
-    
-    case proplists:lookup(filename:basename(Name), TabNames) of
-        none ->
-            lager:notice("No tab is opened by that name");
-        {_, Tab} ->
-            lets:delete(Tab)
+    case app_helper:del_dir(Name) of
+        ok              -> true;
+        {error, enoent} -> lager:notice("no hashtree to destroy, ignoring...");
+        _               -> false
     end;
 destroy(State) ->
     %% Assumption: close was already called on all hashtrees that
@@ -706,7 +703,9 @@ snapshot(State) ->
 -spec multi_select_segment(hashtree(), list('*'|integer()), select_fun(T))
                           -> [{integer(), T}].
 multi_select_segment(#state{id=Id, snapshot=Snap}, Segments, F) ->
+
     [First | Rest] = Segments,
+
     IS1 = #itr_state{snapshot=Snap,
                      id=Id,
                      current_segment=First,
@@ -722,12 +721,11 @@ multi_select_segment(#state{id=Id, snapshot=Snap}, Segments, F) ->
                    encode(Id, First, <<>>)
            end,
 
-    IS2 = case Snap of
-              undefined -> IS1;
-              Snapshot  -> iterate(iterator_move(Snapshot, Seek), IS1)
-    end,
+    IS2 = case IS1 of
+              [] -> IS1;
+              _  -> iterate(iterator_move(Snap, Seek), IS1)
+          end,
 
-    %%IS2 = iterate(iterator_move(Snap, Seek), IS1),
     #itr_state{current_segment=LastSegment,
                segment_acc=LastAcc,
                final_acc=FA} = IS2,
@@ -751,19 +749,30 @@ multi_select_segment(#state{id=Id, snapshot=Snap}, Segments, F) ->
 %% Technically, this would also need to be done if a dets backend were
 %% used instead of lets.
 %%-spec iterator_move('undefined' | list(), any()) -> {'error', 'invalid_iterator'} | {'ok', any, any()}.
+iterator_move([], _) ->
+    {ok, finished};
 iterator_move(Snap, Key) ->
     iterator_move(Snap, 0, Key).
 
 iterator_move(undefined, _Pos, _Seek) ->
     {error, invalid_iterator};
 
-iterator_move(Snap, Pos, prefetch) ->
-    {Key, Binary} = lists:nth(Pos+1, Snap),
-    {ok, Key, Binary};
+iterator_move([], _Pos, _Seek) ->
+    {ok, finished};
 
-iterator_move(Snap, Pos, prefetch_stop) ->
+iterator_move(Snap, Pos, prefetch)
+  when (Pos+1) =< length(Snap) ->
     {Key, Binary} = lists:nth(Pos+1, Snap),
-    {ok, Key, Binary};
+    {ok, Pos+1, Key, Binary};
+
+iterator_move(Snap, Pos, prefetch_stop)
+  when (Pos+1) =< length(Snap) ->
+    {Key, Binary} = lists:nth(Pos+1, Snap),
+    {ok, Pos+1, Key, Binary};
+
+iterator_move(Snap, Pos, _)
+  when (Pos+1) > length(Snap) ->
+    {error, invalid_iterator};
         
 %% Random seek, no need to track position (though we do want to return
 %% it)
@@ -772,17 +781,22 @@ iterator_move(Snap, _Pos, Seek) ->
         {Idx, Key, Binary} -> 
             {ok, Idx, Key, Binary};
         not_found ->
-            {error, invalid_iterator}
+            {error, iterator_key_not_found}
     end.
 
 keyfindindex(Item, List) -> keyfindindex(Item, List, 1).
 keyfindindex(_,    [],       _)          -> not_found;
-keyfindindex(Item, [{Item, V}|_], Index) -> {Index, Item, V};
-keyfindindex(Item, [_|Tl],   Index)      -> keyfindindex(Item, Tl, Index+1).
+keyfindindex(Item, [{K,V}|Tl], Index) ->
+    case binary:longest_common_prefix([Item, K]) of
+        0 -> keyfindindex(Item, Tl, Index+1);
+        _ -> {Index, K, V}
+    end.
 
 -spec iterate({'error','invalid_iterator'} | {binary(),binary()},
               #itr_state{}) -> #itr_state{}.
-iterate({error, invalid_iterator}, IS=#itr_state{}) ->
+iterate({error, _}, IS=#itr_state{}) ->
+    IS;
+iterate({ok, finished}, IS=#itr_state{}) ->
     IS;
 iterate({ok, Pos, K, V}, IS=#itr_state{snapshot=Snap,
                                        id=Id,
@@ -799,16 +813,20 @@ iterate({ok, Pos, K, V}, IS=#itr_state{snapshot=Snap,
                   _ ->
                       CurSeg
               end,
+
     case {SegId, Seg, Segments, IS#itr_state.prefetch} of
         {bad, -1, _, _} ->
             %% Non-segment encountered, end traversal
             IS;
+
         {Id, Segment, _, _} ->
             %% Still reading existing segment
             IS2 = IS#itr_state{current_segment=Segment,
                                segment_acc=[{K,V} | Acc],
                                prefetch=true},
-            iterate(iterator_move(Snap, Pos, prefetch), IS2);
+            Itr = iterator_move(Snap, Pos, prefetch),
+            iterate(Itr, IS2);
+
         {Id, _, [Seg|Remaining], _} ->
             %% Pointing at next segment we are interested in
             IS2 = IS#itr_state{current_segment=Seg,
@@ -816,7 +834,9 @@ iterate({ok, Pos, K, V}, IS=#itr_state{snapshot=Snap,
                                segment_acc=[{K,V}],
                                final_acc=[{Segment, F(Acc)} | FinalAcc],
                                prefetch=true},
-            iterate(iterator_move(Snap, Pos, prefetch), IS2);
+            Itr = iterator_move(Snap, Pos, prefetch),
+            iterate(Itr, IS2);
+
         {Id, _, ['*'], _} ->
             %% Pointing at next segment we are interested in
             IS2 = IS#itr_state{current_segment=Seg,
@@ -824,7 +844,9 @@ iterate({ok, Pos, K, V}, IS=#itr_state{snapshot=Snap,
                                segment_acc=[{K,V}],
                                final_acc=[{Segment, F(Acc)} | FinalAcc],
                                prefetch=true},
-            iterate(iterator_move(Snap, Pos, prefetch), IS2);
+            Itr = iterator_move(Snap, Pos, prefetch),
+            iterate(Itr, IS2);
+
         {Id, NextSeg, [NextSeg|Remaining], _} ->
             %% A previous prefetch_stop left us at the start of the
             %% next interesting segment.
@@ -832,14 +854,19 @@ iterate({ok, Pos, K, V}, IS=#itr_state{snapshot=Snap,
                                remaining_segments=Remaining,
                                segment_acc=[{K,V}],
                                prefetch=true},
-            iterate(iterator_move(Snap, Pos, prefetch), IS2);
+            Itr = iterator_move(Snap, Pos, prefetch),
+            iterate(Itr, IS2);
+
         {Id, _, [_NextSeg | _Remaining], true} ->
             %% Pointing at uninteresting segment, but need to halt the
             %% prefetch to ensure the interator can be reused
             IS2 = IS#itr_state{segment_acc=[],
                                final_acc=[{Segment, F(Acc)} | FinalAcc],
                                prefetch=false},
-            iterate(iterator_move(Snap, Pos, prefetch_stop), IS2);            
+
+            Itr = iterator_move(Snap, Pos, prefetch_stop),
+            iterate(Itr, IS2);
+
         {Id, _, [NextSeg | Remaining], false} ->
             %% Pointing at uninteresting segment, seek to next interesting one
             Seek = encode(Id, NextSeg, <<>>),
@@ -847,7 +874,9 @@ iterate({ok, Pos, K, V}, IS=#itr_state{snapshot=Snap,
                                remaining_segments=Remaining,
                                segment_acc=[],
                                final_acc=[{Segment, F(Acc)} | FinalAcc]},
-            iterate(iterator_move(Snap, Pos, Seek), IS2);
+            Itr = iterator_move(Snap, Pos, Seek),
+            iterate(Itr, IS2);
+
         {_, _, _, true} ->
             %% Done with traversal, but need to stop the prefetch to
             %% ensure the iterator can be reused. The next operation
@@ -855,9 +884,10 @@ iterate({ok, Pos, K, V}, IS=#itr_state{snapshot=Snap,
             %% with the data returned here.
             _ = iterator_move(Snap, Pos, prefetch_stop),
             IS#itr_state{prefetch=false};
+
         {_, _, _, false} ->
             %% Done with traversal
-            IS
+            IS#itr_state{snapshot=undefined}
     end.
 
 -spec compare(integer(), integer(), hashtree(), remote_fun(), acc_fun(X), X) -> X.
