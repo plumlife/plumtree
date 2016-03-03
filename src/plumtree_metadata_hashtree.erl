@@ -64,6 +64,14 @@
 %% directory where other cluster metadata is stored in `plumtree_data_dir'
 %% as the data root.
 -spec start_link() -> {ok, pid()} | ignore | {error, term()}.
+%% start_link() ->
+%%     %% Try to fetch a specific hashtree dir, if not then fallback on
+%%     %% the default plumtree_data_dir
+%%     Root = app_helper:get_env(plumtree, plumtree_data_dir),
+
+%%     DataRoot = filename:join(Root, "trees"),
+%%     start_link(DataRoot).
+
 start_link() ->
     %% Try to fetch a specific hashtree dir, if not then fallback on
     %% the default plumtree_data_dir
