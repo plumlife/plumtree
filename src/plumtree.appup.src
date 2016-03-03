@@ -1,12 +1,11 @@
-{"0.2.0",
-  [{"0.1.2",
-    [ {restart_application, plumtree}
-    , {apply,{application,ensure_all_started,[plumtree]}}
+{"0.2.1",
+  [{"0.2.0",
+    [ {apply,{os,cmd,["rm -rf /data/lightpad/plumtree/trees"]}}
+    , {restart_application, plumtree}
     ]}
   ],
-  [{"0.1.2",
+  [{"0.2.0",
     [ {restart_application, plumtree}
-    , {apply,{application,ensure_all_started,[plumtree]}}
     ]}
   ]
 }.

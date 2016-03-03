@@ -126,6 +126,7 @@
          mem_levels/1]).
 
 -ifdef(TEST).
+-compile(export_all).
 -export([local_compare/2]).
 -export([run_local/0,
          run_local/1,
@@ -249,14 +250,10 @@ close(State) ->
 
 -spec destroy(string() | hashtree()) -> boolean() | hashtree().
 destroy(Name) when is_list(Name) ->
-    Tabs = lets:all(),
-    TabNames = lists:map(fun(T) -> {lets:info(T, name), T} end, Tabs),
-    
-    case proplists:lookup(filename:basename(Name), TabNames) of
-        none ->
-            lager:notice("No tab is opened by that name");
-        {_, Tab} ->
-            lets:delete(Tab)
+    case app_helper:del_dir(Name) of
+        ok              -> true;
+        {error, enoent} -> lager:notice("no hashtree to destroy, ignoring...");
+        _               -> false
     end;
 destroy(State) ->
     %% Assumption: close was already called on all hashtrees that
@@ -699,15 +696,28 @@ encode_meta(Key) ->
 hashes(State, Segments) ->
     multi_select_segment(State, Segments, fun hash/1).
 
+%% @doc Take a snapshot of the lets table by copying it's entire K/V
+%% set into memory, passing it around in the state record.
 -spec snapshot(hashtree()) -> hashtree().
 snapshot(State) ->
     Snap = lets:tab2list(State#state.ref),
     State#state{ snapshot=Snap }.
 
+
+%% @doc Select a segment using an iterator-esque pattern, this has
+%% been hacked to try and keep it as close to the Riak / Original
+%% Plumtree implementation but there are some performance concerns.
+%% 
+%% NOTE: instead of using the iterator returned from eleveldb's
+%% snapshot function, we're taking a copy of the K/V list in memory as
+%% our "snapshot" - hence the passing around of the snapshot in the
+%% state record instead of the `itr`.
 -spec multi_select_segment(hashtree(), list('*'|integer()), select_fun(T))
                           -> [{integer(), T}].
 multi_select_segment(#state{id=Id, snapshot=Snap}, Segments, F) ->
+
     [First | Rest] = Segments,
+
     IS1 = #itr_state{snapshot=Snap,
                      id=Id,
                      current_segment=First,
@@ -723,12 +733,13 @@ multi_select_segment(#state{id=Id, snapshot=Snap}, Segments, F) ->
                    encode(Id, First, <<>>)
            end,
 
+    %% The snapshot *could* be empty at this time, just return the
+    %% "new" iterator state
     IS2 = case Snap of
-              undefined -> IS1;
-              Snapshot  -> iterate(iterator_move(Snapshot, Seek), IS1)
-    end,
+              [] -> IS1;
+              _  -> iterate(iterator_move(Snap, Seek), IS1)
+          end,
 
-    %%IS2 = iterate(iterator_move(Snap, Seek), IS1),
     #itr_state{current_segment=LastSegment,
                segment_acc=LastAcc,
                final_acc=FA} = IS2,
@@ -742,48 +753,88 @@ multi_select_segment(#state{id=Id, snapshot=Snap}, Segments, F) ->
             Result
     end.
 
-%% (ixmatus) I'm keeping this around purely for the random-access seek
-%% behavior that's used in the `multi_select_segment/3` function.
+%% @doc This function has been heavily modified to replicate the
+%% eleveldb iterator functionality using seek, prefetch, and
+%% stop_prefetch.
 %%
-%% Otherwise, `iterate/2` is being re-written to become a folding
-%% function instead of relying on the iterating behavior we do not
-%% have access to in lets.
-%%
-%% Technically, this would also need to be done if a dets backend were
-%% used instead of lets.
-%%-spec iterator_move('undefined' | list(), any()) -> {'error', 'invalid_iterator'} | {'ok', any, any()}.
+%% See below for important caveats and a description of the seek
+%% behavior specifically.
+iterator_move([], _) ->
+    {ok, finished};
 iterator_move(Snap, Key) ->
     iterator_move(Snap, 0, Key).
 
 iterator_move(undefined, _Pos, _Seek) ->
     {error, invalid_iterator};
 
-iterator_move(Snap, Pos, prefetch) ->
-    {Key, Binary} = lists:nth(Pos+1, Snap),
-    {ok, Key, Binary};
+iterator_move([], _Pos, _Seek) ->
+    {ok, finished};
 
-iterator_move(Snap, Pos, prefetch_stop) ->
+iterator_move(Snap, Pos, prefetch)
+  when (Pos+1) =< length(Snap) ->
     {Key, Binary} = lists:nth(Pos+1, Snap),
-    {ok, Key, Binary};
+    {ok, Pos+1, Key, Binary};
+
+iterator_move(Snap, Pos, prefetch_stop)
+  when (Pos+1) =< length(Snap) ->
+    {Key, Binary} = lists:nth(Pos+1, Snap),
+    {ok, Pos+1, Key, Binary};
+
+iterator_move(Snap, Pos, _)
+  when (Pos+1) > length(Snap) ->
+    {error, invalid_iterator};
         
-%% Random seek, no need to track position (though we do want to return
-%% it)
+%% Perform a search of the keyspace for keys that have the largest
+%% matching common prefix.
 iterator_move(Snap, _Pos, Seek) ->
     case keyfindindex(Seek, Snap) of
         {Idx, Key, Binary} -> 
             {ok, Idx, Key, Binary};
         not_found ->
-            {error, invalid_iterator}
+            {error, iterator_key_not_found}
     end.
 
-keyfindindex(Item, List) -> keyfindindex(Item, List, 1).
-keyfindindex(_,    [],       _)          -> not_found;
-keyfindindex(Item, [{Item, V}|_], Index) -> {Index, Item, V};
-keyfindindex(Item, [_|Tl],   Index)      -> keyfindindex(Item, Tl, Index+1).
+%% @doc Seek to a key in a K/V list if any is a prefix of the item to
+%% search and return the index at which it is found.
+%%
+%% I'm not entirely sure what the LevelDB Key Seek algorithm *is* but
+%% the behavior is as follows: iterate over all keys in the keyspace
+%% performing a prefix match against the desired seek key. Select the
+%% key with the longest common prefix.
+%%
+%% I imagine the asymptotic complexity of this function is gross
+%% compared to LevelDB's iterator seek but it's the best I've got for
+%% now and our expected keyspace is extremely small so I'm not
+%% terribly worried about the time and space. I would be very worried
+%% if this was in use for a database though and the whole algorithm
+%% would likely need re-implementation to not be so dependent on this
+%% specific seeking behavior.
+%%
+%% -- (2016-03-03) Parnell Springmeyer
+keyfindindex(Item, List) -> 
+    Matches = keyfindindex(Item, List, 1, []),
+    case lists:ukeysort(1, Matches) of
+        []     -> not_found;
+        Sorted ->
+            {_,R} = lists:last(Sorted),
+            R
+    end.
+keyfindindex(_,    [],       _, Acc)       -> Acc;
+keyfindindex(Item, [{K,V}|Tl], Index, Acc) ->
+    case binary:longest_common_prefix([Item, K]) of
+        0 -> keyfindindex(Item, Tl, Index+1, Acc);
+        N -> keyfindindex(Item, Tl, Index+1, [{N,{Index,K,V}}|Acc])
+    end.
 
+
+%% @doc This function is largely the same from the Riak / Original
+%% Plumtree one with minor modifications to the argument types to
+%% accomodate the return type of the `iterator_move/3` function.
 -spec iterate({'error','invalid_iterator'} | {binary(),binary()},
               #itr_state{}) -> #itr_state{}.
-iterate({error, invalid_iterator}, IS=#itr_state{}) ->
+iterate({error, _}, IS=#itr_state{}) ->
+    IS;
+iterate({ok, finished}, IS=#itr_state{}) ->
     IS;
 iterate({ok, Pos, K, V}, IS=#itr_state{snapshot=Snap,
                                        id=Id,
@@ -800,16 +851,20 @@ iterate({ok, Pos, K, V}, IS=#itr_state{snapshot=Snap,
                   _ ->
                       CurSeg
               end,
+
     case {SegId, Seg, Segments, IS#itr_state.prefetch} of
         {bad, -1, _, _} ->
             %% Non-segment encountered, end traversal
             IS;
+
         {Id, Segment, _, _} ->
             %% Still reading existing segment
             IS2 = IS#itr_state{current_segment=Segment,
                                segment_acc=[{K,V} | Acc],
                                prefetch=true},
-            iterate(iterator_move(Snap, Pos, prefetch), IS2);
+            Itr = iterator_move(Snap, Pos, prefetch),
+            iterate(Itr, IS2);
+
         {Id, _, [Seg|Remaining], _} ->
             %% Pointing at next segment we are interested in
             IS2 = IS#itr_state{current_segment=Seg,
@@ -817,7 +872,9 @@ iterate({ok, Pos, K, V}, IS=#itr_state{snapshot=Snap,
                                segment_acc=[{K,V}],
                                final_acc=[{Segment, F(Acc)} | FinalAcc],
                                prefetch=true},
-            iterate(iterator_move(Snap, Pos, prefetch), IS2);
+            Itr = iterator_move(Snap, Pos, prefetch),
+            iterate(Itr, IS2);
+
         {Id, _, ['*'], _} ->
             %% Pointing at next segment we are interested in
             IS2 = IS#itr_state{current_segment=Seg,
@@ -825,7 +882,9 @@ iterate({ok, Pos, K, V}, IS=#itr_state{snapshot=Snap,
                                segment_acc=[{K,V}],
                                final_acc=[{Segment, F(Acc)} | FinalAcc],
                                prefetch=true},
-            iterate(iterator_move(Snap, Pos, prefetch), IS2);
+            Itr = iterator_move(Snap, Pos, prefetch),
+            iterate(Itr, IS2);
+
         {Id, NextSeg, [NextSeg|Remaining], _} ->
             %% A previous prefetch_stop left us at the start of the
             %% next interesting segment.
@@ -833,14 +892,19 @@ iterate({ok, Pos, K, V}, IS=#itr_state{snapshot=Snap,
                                remaining_segments=Remaining,
                                segment_acc=[{K,V}],
                                prefetch=true},
-            iterate(iterator_move(Snap, Pos, prefetch), IS2);
+            Itr = iterator_move(Snap, Pos, prefetch),
+            iterate(Itr, IS2);
+
         {Id, _, [_NextSeg | _Remaining], true} ->
             %% Pointing at uninteresting segment, but need to halt the
             %% prefetch to ensure the interator can be reused
             IS2 = IS#itr_state{segment_acc=[],
                                final_acc=[{Segment, F(Acc)} | FinalAcc],
                                prefetch=false},
-            iterate(iterator_move(Snap, Pos, prefetch_stop), IS2);            
+
+            Itr = iterator_move(Snap, Pos, prefetch_stop),
+            iterate(Itr, IS2);
+
         {Id, _, [NextSeg | Remaining], false} ->
             %% Pointing at uninteresting segment, seek to next interesting one
             Seek = encode(Id, NextSeg, <<>>),
@@ -848,7 +912,9 @@ iterate({ok, Pos, K, V}, IS=#itr_state{snapshot=Snap,
                                remaining_segments=Remaining,
                                segment_acc=[],
                                final_acc=[{Segment, F(Acc)} | FinalAcc]},
-            iterate(iterator_move(Snap, Pos, Seek), IS2);
+            Itr = iterator_move(Snap, Pos, Seek),
+            iterate(Itr, IS2);
+
         {_, _, _, true} ->
             %% Done with traversal, but need to stop the prefetch to
             %% ensure the iterator can be reused. The next operation
@@ -856,9 +922,10 @@ iterate({ok, Pos, K, V}, IS=#itr_state{snapshot=Snap,
             %% with the data returned here.
             _ = iterator_move(Snap, Pos, prefetch_stop),
             IS#itr_state{prefetch=false};
+
         {_, _, _, false} ->
             %% Done with traversal
-            IS
+            IS#itr_state{snapshot=undefined}
     end.
 
 -spec compare(integer(), integer(), hashtree(), remote_fun(), acc_fun(X), X) -> X.
@@ -1153,13 +1220,21 @@ snapshot_test() ->
     B0 = insert(<<"10">>, <<"52">>, new()),
     A1 = update_tree(A0),
     B1 = update_tree(B0),
-    B2 = insert(<<"10">>, <<"42">>, B1),
-    KeyDiff = local_compare(A1, B1),
+    
+    B2 = insert(<<"20">>, <<"100">>, B1),
+    B3 = update_tree(B2),
+    B4 = insert(<<"21">>, <<"12">>, B3),
+    B5 = update_tree(B4),
+
+    KeyDiff = local_compare(A1, B5),
     close(A1),
     close(B2),
+    close(B3),
+    close(B4),
+    close(B5),
     destroy(A1),
     destroy(B2),
-    ?assertEqual([{different, <<"10">>}], KeyDiff),
+    ?assertEqual([{missing,<<"20">>},{different,<<"10">>},{missing,<<"21">>}], KeyDiff),
     ok.
 
 delta_test() ->
