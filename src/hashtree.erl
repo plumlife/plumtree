@@ -752,7 +752,12 @@ multi_select_segment(#state{id=Id, snapshot=Snap}, Segments, F) ->
             Result
     end.
 
-%%-spec iterator_move('undefined' | list(), any()) -> {'error', 'invalid_iterator'} | {'ok', any, any()}.
+%% @doc This function has been heavily modified to replicate the
+%% eleveldb iterator functionality using seek, prefetch, and
+%% stop_prefetch.
+%%
+%% See below for important caveats and a description of the seek
+%% behavior specifically.
 iterator_move([], _) ->
     {ok, finished};
 iterator_move(Snap, Key) ->
@@ -822,8 +827,8 @@ keyfindindex(Item, [{K,V}|Tl], Index, Acc) ->
 
 
 %% @doc This function is largely the same from the Riak / Original
-%% Plumtree one with minor modifications to the return type of the
-%% `iterator_move/3` function.
+%% Plumtree one with minor modifications to the argument types to
+%% accomodate the return type of the `iterator_move/3` function.
 -spec iterate({'error','invalid_iterator'} | {binary(),binary()},
               #itr_state{}) -> #itr_state{}.
 iterate({error, _}, IS=#itr_state{}) ->
