@@ -13,6 +13,7 @@
                  ]},
   {mod, { plumtree_app, []}},
   {modules, []},
-  {env, [
-         {plumtree_data_dir, "data"}]}
+  {env, [ {plumtree_data_dir, "data"}
+        , {hashtree_data_dir, "/tmp/plumtree-hashtree"}
+        ]}
  ]}.
