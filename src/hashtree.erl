@@ -695,11 +695,22 @@ encode_meta(Key) ->
 hashes(State, Segments) ->
     multi_select_segment(State, Segments, fun hash/1).
 
+%% @doc Take a snapshot of the lets table by copying it's entire K/V
+%% set into memory, passing it around in the state record.
 -spec snapshot(hashtree()) -> hashtree().
 snapshot(State) ->
     Snap = lets:tab2list(State#state.ref),
     State#state{ snapshot=Snap }.
 
+
+%% @doc Select a segment using an iterator-esque pattern, this has
+%% been hacked to try and keep it as close to the Riak / Original
+%% Plumtree implementation but there are some performance concerns.
+%% 
+%% NOTE: instead of using the iterator returned from eleveldb's
+%% snapshot function, we're taking a copy of the K/V list in memory as
+%% our "snapshot" - hence the passing around of the snapshot in the
+%% state record instead of the `itr`.
 -spec multi_select_segment(hashtree(), list('*'|integer()), select_fun(T))
                           -> [{integer(), T}].
 multi_select_segment(#state{id=Id, snapshot=Snap}, Segments, F) ->
@@ -721,7 +732,9 @@ multi_select_segment(#state{id=Id, snapshot=Snap}, Segments, F) ->
                    encode(Id, First, <<>>)
            end,
 
-    IS2 = case IS1 of
+    %% The snapshot *could* be empty at this time, just return the
+    %% "new" iterator state
+    IS2 = case Snap of
               [] -> IS1;
               _  -> iterate(iterator_move(Snap, Seek), IS1)
           end,
@@ -739,15 +752,6 @@ multi_select_segment(#state{id=Id, snapshot=Snap}, Segments, F) ->
             Result
     end.
 
-%% (ixmatus) I'm keeping this around purely for the random-access seek
-%% behavior that's used in the `multi_select_segment/3` function.
-%%
-%% Otherwise, `iterate/2` is being re-written to become a folding
-%% function instead of relying on the iterating behavior we do not
-%% have access to in lets.
-%%
-%% Technically, this would also need to be done if a dets backend were
-%% used instead of lets.
 %%-spec iterator_move('undefined' | list(), any()) -> {'error', 'invalid_iterator'} | {'ok', any, any()}.
 iterator_move([], _) ->
     {ok, finished};
@@ -774,8 +778,8 @@ iterator_move(Snap, Pos, _)
   when (Pos+1) > length(Snap) ->
     {error, invalid_iterator};
         
-%% Random seek, no need to track position (though we do want to return
-%% it)
+%% Perform a search of the keyspace for keys that have the largest
+%% matching common prefix.
 iterator_move(Snap, _Pos, Seek) ->
     case keyfindindex(Seek, Snap) of
         {Idx, Key, Binary} -> 
@@ -783,18 +787,43 @@ iterator_move(Snap, _Pos, Seek) ->
         not_found ->
             {error, iterator_key_not_found}
     end.
+
 %% @doc Seek to a key in a K/V list if any is a prefix of the item to
 %% search and return the index at which it is found.
 %%
+%% I'm not entirely sure what the LevelDB Key Seek algorithm *is* but
+%% the behavior is as follows: iterate over all keys in the keyspace
+%% performing a prefix match against the desired seek key. Select the
+%% key with the longest common prefix.
 %%
-keyfindindex(Item, List) -> keyfindindex(Item, List, 1).
-keyfindindex(_,    [],       _)          -> not_found;
-keyfindindex(Item, [{K,V}|Tl], Index) ->
+%% I imagine the asymptotic complexity of this function is gross
+%% compared to LevelDB's iterator seek but it's the best I've got for
+%% now and our expected keyspace is extremely small so I'm not
+%% terribly worried about the time and space. I would be very worried
+%% if this was in use for a database though and the whole algorithm
+%% would likely need re-implementation to not be so dependent on this
+%% specific seeking behavior.
+%%
+%% -- (2016-03-03) Parnell Springmeyer
+keyfindindex(Item, List) -> 
+    Matches = keyfindindex(Item, List, 1, []),
+    case lists:ukeysort(1, Matches) of
+        []     -> not_found;
+        Sorted ->
+            {_,R} = lists:last(Sorted),
+            R
+    end.
+keyfindindex(_,    [],       _, Acc)       -> Acc;
+keyfindindex(Item, [{K,V}|Tl], Index, Acc) ->
     case binary:longest_common_prefix([Item, K]) of
-        0 -> keyfindindex(Item, Tl, Index+1);
-        _ -> {Index, K, V}
+        0 -> keyfindindex(Item, Tl, Index+1, Acc);
+        N -> keyfindindex(Item, Tl, Index+1, [{N,{Index,K,V}}|Acc])
     end.
 
+
+%% @doc This function is largely the same from the Riak / Original
+%% Plumtree one with minor modifications to the return type of the
+%% `iterator_move/3` function.
 -spec iterate({'error','invalid_iterator'} | {binary(),binary()},
               #itr_state{}) -> #itr_state{}.
 iterate({error, _}, IS=#itr_state{}) ->
