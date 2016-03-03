@@ -783,7 +783,10 @@ iterator_move(Snap, _Pos, Seek) ->
         not_found ->
             {error, iterator_key_not_found}
     end.
-
+%% @doc Seek to a key in a K/V list if any is a prefix of the item to
+%% search and return the index at which it is found.
+%%
+%%
 keyfindindex(Item, List) -> keyfindindex(Item, List, 1).
 keyfindindex(_,    [],       _)          -> not_found;
 keyfindindex(Item, [{K,V}|Tl], Index) ->
@@ -1182,13 +1185,21 @@ snapshot_test() ->
     B0 = insert(<<"10">>, <<"52">>, new()),
     A1 = update_tree(A0),
     B1 = update_tree(B0),
-    B2 = insert(<<"10">>, <<"42">>, B1),
-    KeyDiff = local_compare(A1, B1),
+    
+    B2 = insert(<<"20">>, <<"100">>, B1),
+    B3 = update_tree(B2),
+    B4 = insert(<<"21">>, <<"12">>, B3),
+    B5 = update_tree(B4),
+
+    KeyDiff = local_compare(A1, B5),
     close(A1),
     close(B2),
+    close(B3),
+    close(B4),
+    close(B5),
     destroy(A1),
     destroy(B2),
-    ?assertEqual([{different, <<"10">>}], KeyDiff),
+    ?assertEqual([{missing,<<"20">>},{different,<<"10">>},{missing,<<"21">>}], KeyDiff),
     ok.
 
 delta_test() ->
