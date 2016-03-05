@@ -1246,6 +1246,76 @@ delta_test() ->
     Diff2 = local_compare(T2, T1),
     ?assertEqual([{missing, <<"1">>}, {remote_missing, <<"2">>}], Diff2),
     ok.
+
+hashtree_construction_test() ->
+    Root = "/tmp/hashtree",
+
+    RootHost = use_node_host(Root),
+
+    %% Ensure the directories exist
+    ok = filelib:ensure_dir(RootHost),
+
+    DataRoot0 = filename:join(RootHost, "trees00"),
+    DataRoot1 = filename:join(RootHost, "trees01"),
+
+    NumSegs = node_num_segs('$ht_root'),
+    Width   = node_width('$ht_root'),
+    
+    Opts0 = [{segment_path, DataRoot0}, {segments, NumSegs}, {width, Width}],
+    <<NodeMD50:128/integer>> = crypto:hash(md5, (term_to_binary('$ht_root'))),
+    TreeId0 = {'hashtree_one', <<NodeMD50:176/integer>>},
+    A = hashtree:new(TreeId0, Opts0),
+
+    Opts1 = [{segment_path, DataRoot1}, {segments, NumSegs}, {width, Width}],
+
+    <<NodeMD51:128/integer>> = crypto:hash(md5, (term_to_binary('$ht_root'))),
+    TreeId1 = {'hashtree_two', <<NodeMD51:176/integer>>},
+    B = hashtree:new(TreeId1, Opts1),
+
+    A0 = insert(<<"10">>, <<"42">>, A),
+    B0 = insert(<<"10">>, <<"52">>, B),
+    A1 = update_tree(A0),
+    B1 = update_tree(B0),
+    
+    B2 = insert(<<"20">>, <<"100">>, B1),
+    B3 = update_tree(B2),
+    B4 = insert(<<"21">>, <<"12">>, B3),
+    B5 = update_tree(B4),
+
+    KeyDiff = local_compare(A1, B5),
+    close(A1),
+    close(B2),
+    close(B3),
+    close(B4),
+    close(B5),
+    destroy(A1),
+    destroy(B2),
+
+    ?assertEqual([{missing,<<"20">>},{missing,<<"21">>},{different,<<"10">>}], KeyDiff),
+    ok.    
+    
+node_num_segs('$ht_root') ->
+    256 * 256;
+node_num_segs(NodeName) ->
+    case length(NodeName) < 2 of
+        true -> 512 * 512;
+        false -> 1024 * 1024
+    end.
+
+node_width('$ht_root') ->
+    256;
+node_width(NodeName) ->
+    case length(NodeName) < 2 of
+        true -> 512;
+        false -> 1024
+    end.
+
+use_node_host(Root)
+  when node() == 'nonode@nohost' -> 
+    Root;
+use_node_host(Root) ->
+    filename:join(Root, atom_to_list(node())).
+
 -endif.
 
 %%%===================================================================
