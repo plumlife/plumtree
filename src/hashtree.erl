@@ -1039,12 +1039,12 @@ expand(V, N, Acc) ->
 -ifdef(TEST).
 
 run_local() ->
-    run_local(10000).
+    run_local(1000).
 run_local(N) ->
     timer:tc(fun do_local/1, [N]).
 
 run_concurrent_build() ->
-    run_concurrent_build(10000).
+    run_concurrent_build(1000).
 run_concurrent_build(N) ->
     run_concurrent_build(N, N).
 run_concurrent_build(N1, N2) ->
@@ -1057,7 +1057,7 @@ run_multiple(Count, N) ->
     timer:tc(fun peval/1, [Tasks]).
 
 run_remote() ->
-    run_remote(100000).
+    run_remote(1000).
 run_remote(N) ->
     timer:tc(fun do_remote/1, [N]).
 
