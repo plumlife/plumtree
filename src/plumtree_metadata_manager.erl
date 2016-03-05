@@ -134,8 +134,9 @@ get(Node, {{Prefix, SubPrefix}, _Key}=PKey)
     gen_server:call({?SERVER, Node}, {get, PKey}, infinity).
 
 
-%% @doc Returns a full-prefix iterator: an iterator for all full-prefixes that have keys stored under them
-%% When done with the iterator, iterator_close/1 must be called
+%% @doc Returns a full-prefix iterator: an iterator for all
+%% full-prefixes that have keys stored under them When done with the
+%% iterator, iterator_close/1 must be called
 -spec iterator() -> metadata_iterator().
 iterator() ->
     iterator(undefined).
