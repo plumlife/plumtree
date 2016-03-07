@@ -340,7 +340,10 @@ should_insert(HKey, Opts, State) ->
             
             %% TODO (BASHO): Use bloom filter so we don't always call
             %% get here.
-            lets:member(State#state.ref, HKey);
+            case lets:member(State#state.ref, HKey) of
+                true  -> false;
+                false -> true
+            end;
         _ ->
             true
     end.
@@ -1040,12 +1043,12 @@ expand(V, N, Acc) ->
 -ifdef(TEST).
 
 run_local() ->
-    run_local(10000).
+    run_local(1000).
 run_local(N) ->
     timer:tc(fun do_local/1, [N]).
 
 run_concurrent_build() ->
-    run_concurrent_build(10000).
+    run_concurrent_build(1000).
 run_concurrent_build(N) ->
     run_concurrent_build(N, N).
 run_concurrent_build(N1, N2) ->
@@ -1058,7 +1061,7 @@ run_multiple(Count, N) ->
     timer:tc(fun peval/1, [Tasks]).
 
 run_remote() ->
-    run_remote(100000).
+    run_remote(1000).
 run_remote(N) ->
     timer:tc(fun do_remote/1, [N]).
 
@@ -1216,8 +1219,10 @@ compare(Tree, Remote, AccFun) ->
 %% LevelDB store that is used by `compare', therefore isolating the
 %% compare from newer/concurrent insertions into the tree.
 snapshot_test() ->
-    A0 = insert(<<"10">>, <<"42">>, new()),
-    B0 = insert(<<"10">>, <<"52">>, new()),
+    {A, B} = initialize_trees(),
+
+    A0 = insert(<<"10">>, <<"42">>, A),
+    B0 = insert(<<"10">>, <<"52">>, B),
     A1 = update_tree(A0),
     B1 = update_tree(B0),
     
@@ -1234,7 +1239,7 @@ snapshot_test() ->
     close(B5),
     destroy(A1),
     destroy(B2),
-    ?assertEqual([{missing,<<"20">>},{different,<<"10">>},{missing,<<"21">>}], KeyDiff),
+    ?assertEqual([{missing,<<"20">>},{missing,<<"21">>},{different,<<"10">>}], KeyDiff),
     ok.
 
 delta_test() ->
@@ -1247,6 +1252,116 @@ delta_test() ->
     Diff2 = local_compare(T2, T1),
     ?assertEqual([{missing, <<"1">>}, {remote_missing, <<"2">>}], Diff2),
     ok.
+
+key_test() ->
+    {A, B} = initialize_trees(),
+
+    A0 = insert(<<"9564a8c0-7da5-4323-8bb9-232e9d8a2e38">>, <<"42">>, A),
+    B0 = insert(<<"9564a8c0-7da5-4323-8bb9-232e9d8a2e38">>, <<"52">>, B),
+    A1 = update_tree(A0),
+    B1 = update_tree(B0),
+    
+    B2 = insert(<<"751bcd56-e774-47f1-93d0-fc0602993809">>, <<"100">>, B1),
+    B3 = update_tree(B2),
+    B4 = insert(<<"08901ad1-658f-4550-acaa-dce2423a868a">>, <<"12">>, B3),
+    B5 = update_tree(B4),
+
+    KeyDiff = local_compare(A1, B5),
+    close(A1),
+    close(B2),
+    close(B3),
+    close(B4),
+    close(B5),
+    destroy(A1),
+    destroy(B2),
+
+    ?assertEqual([ {different,<<"9564a8c0-7da5-4323-8bb9-232e9d8a2e38">>}
+                 , {missing, <<"08901ad1-658f-4550-acaa-dce2423a868a">>}
+                 , {missing, <<"751bcd56-e774-47f1-93d0-fc0602993809">>}
+                 ], KeyDiff),
+    ok.
+
+outoforder_diff_test() ->
+    {A, B} = initialize_trees(),
+
+    %% Insert keys (and different values) *out of order* to make sure
+    %% our comparisons work correctly
+    A0 = insert(<<"9564a8c0-7da5-4323-8bb9-232e9d8a2e38">>, <<"42">>, A),
+    B0 = insert(<<"751bcd56-e774-47f1-93d0-fc0602993809">>, <<"52">>, B),
+    A1 = update_tree(A0),
+    B1 = update_tree(B0),
+    
+    B2 = insert(<<"9564a8c0-7da5-4323-8bb9-232e9d8a2e38">>, <<"100">>, B1),
+    B3 = update_tree(B2),
+    B4 = insert(<<"08901ad1-658f-4550-acaa-dce2423a868a">>, <<"12">>, B3),
+    B5 = update_tree(B4),
+
+    KeyDiff = local_compare(A1, B5),
+    close(A1),
+    close(B2),
+    close(B3),
+    close(B4),
+    close(B5),
+    destroy(A1),
+    destroy(B2),
+
+    ?assertEqual([ {different,<<"9564a8c0-7da5-4323-8bb9-232e9d8a2e38">>}
+                 , {missing, <<"08901ad1-658f-4550-acaa-dce2423a868a">>}
+                 , {missing, <<"751bcd56-e774-47f1-93d0-fc0602993809">>}
+                 ], KeyDiff),
+    ok.
+
+initialize_trees() ->
+    Root = "/tmp/hashtree",
+
+    os:cmd("rm -rf " ++ Root),
+
+    RootHost = use_node_host(Root),
+
+    %% Ensure the directories exist
+    ok = filelib:ensure_dir(RootHost),
+
+    DataRoot0 = filename:join(RootHost, "trees00"),
+    DataRoot1 = filename:join(RootHost, "trees01"),
+
+    NumSegs = node_num_segs('$ht_root'),
+    Width   = node_width('$ht_root'),
+
+    %% Initialize Tree A
+    Opts0 = [{segment_path, DataRoot0}, {segments, NumSegs}, {width, Width}],
+    <<NodeMD50:128/integer>> = crypto:hash(md5, (term_to_binary('$ht_root'))),
+    TreeId0 = {'hashtree_one', <<NodeMD50:176/integer>>},
+    A = hashtree:new(TreeId0, Opts0),
+
+    %% Initialize Tree B
+    Opts1 = [{segment_path, DataRoot1}, {segments, NumSegs}, {width, Width}],
+    <<NodeMD51:128/integer>> = crypto:hash(md5, (term_to_binary('$ht_root'))),
+    TreeId1 = {'hashtree_two', <<NodeMD51:176/integer>>},
+    B = hashtree:new(TreeId1, Opts1),
+    {A, B}.
+    
+node_num_segs('$ht_root') ->
+    256 * 256;
+node_num_segs(NodeName) ->
+    case length(NodeName) < 2 of
+        true -> 512 * 512;
+        false -> 1024 * 1024
+    end.
+
+node_width('$ht_root') ->
+    256;
+node_width(NodeName) ->
+    case length(NodeName) < 2 of
+        true -> 512;
+        false -> 1024
+    end.
+
+use_node_host(Root)
+  when node() == 'nonode@nohost' -> 
+    Root;
+use_node_host(Root) ->
+    filename:join(Root, atom_to_list(node())).
+
 -endif.
 
 %%%===================================================================
