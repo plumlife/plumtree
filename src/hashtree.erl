@@ -1272,14 +1272,14 @@ hashtree_construction_test() ->
     TreeId1 = {'hashtree_two', <<NodeMD51:176/integer>>},
     B = hashtree:new(TreeId1, Opts1),
 
-    A0 = insert(<<"10">>, <<"42">>, A),
-    B0 = insert(<<"10">>, <<"52">>, B),
+    A0 = insert(<<"9564a8c0-7da5-4323-8bb9-232e9d8a2e38">>, <<"42">>, A),
+    B0 = insert(<<"9564a8c0-7da5-4323-8bb9-232e9d8a2e38">>, <<"52">>, B),
     A1 = update_tree(A0),
     B1 = update_tree(B0),
     
-    B2 = insert(<<"20">>, <<"100">>, B1),
+    B2 = insert(<<"751bcd56-e774-47f1-93d0-fc0602993809">>, <<"100">>, B1),
     B3 = update_tree(B2),
-    B4 = insert(<<"21">>, <<"12">>, B3),
+    B4 = insert(<<"08901ad1-658f-4550-acaa-dce2423a868a">>, <<"12">>, B3),
     B5 = update_tree(B4),
 
     KeyDiff = local_compare(A1, B5),
