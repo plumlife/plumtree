@@ -72,24 +72,35 @@
 %%     DataRoot = filename:join(Root, "trees"),
 %%     start_link(DataRoot).
 
+%% start_link() ->
+%%     %% Try to fetch a specific hashtree dir, if not then fallback on
+%%     %% the default plumtree_data_dir
+%%     Root = app_helper:get_env(plumtree, hashtree_data_dir, app_helper:get_env(plumtree, plumtree_data_dir)),
+
+%%     RootHost = use_node_host(Root),
+
+%%     %% Ensure the directories exist
+%%     ok = filelib:ensure_dir(RootHost),
+
+%%     DataRoot = filename:join(RootHost, "trees"),
+%%     start_link(DataRoot).
+
 start_link() ->
     %% Try to fetch a specific hashtree dir, if not then fallback on
     %% the default plumtree_data_dir
-    Root = app_helper:get_env(plumtree, hashtree_data_dir, app_helper:get_env(plumtree, plumtree_data_dir)),
-
-    RootHost = use_node_host(Root),
+    Root = app_helper:get_env(plumtree, plumtree_data_dir),
 
     %% Ensure the directories exist
-    ok = filelib:ensure_dir(RootHost),
+    ok = filelib:ensure_dir(Root),
 
-    DataRoot = filename:join(RootHost, "trees"),
+    DataRoot = filename:join(Root, "trees"),
     start_link(DataRoot).
 
-use_node_host(Root)
-  when node() == 'nonode@nohost' -> 
-    Root;
-use_node_host(Root) ->
-    filename:join(Root, atom_to_list(node())).
+%% use_node_host(Root)
+%%   when node() == 'nonode@nohost' -> 
+%%     Root;
+%% use_node_host(Root) ->
+%%     filename:join(Root, atom_to_list(node())).
 
 %% @doc Starts a registered process that manages a {@link
 %% hashtree_tree} for Cluster Metadata. Data for the tree is stored,
