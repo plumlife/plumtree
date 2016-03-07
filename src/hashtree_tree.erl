@@ -192,9 +192,8 @@ new(TreeId, Opts) ->
 -spec destroy(tree()) -> ok.
 destroy(Tree) ->
     ets:foldl(fun({_, Node}, _) ->
-                      hashtree:close(Node)
-                      %% Node1 = hashtree:close(Node),
-                      %% hashtree:destroy(Node1)
+                      Node1 = hashtree:close(Node),
+                      hashtree:destroy(Node1)
               end, undefined, Tree#hashtree_tree.nodes),
     catch ets:delete(Tree#hashtree_tree.nodes),
     ok.
@@ -455,7 +454,7 @@ create_node(?ROOT, Tree) ->
     Opts = [{segment_path, NodePath}, {segments, NumSegs}, {width, Width}],
     %% destroy any data that previously existed because its lingering from
     %% a tree that was not properly destroyed
-    %%hashtree:destroy(NodePath),
+    hashtree:destroy(NodePath),
     Node = hashtree:new(NodeId, Opts),
     set_node(?ROOT, Node, Tree);
 create_node([], Tree) ->
