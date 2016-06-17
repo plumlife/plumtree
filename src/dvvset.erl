@@ -43,6 +43,7 @@
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
+-compile(export_all).
 -endif.
 
 -export([new/1,
@@ -306,7 +307,6 @@ join_and_replace(Ir, V, C) ->
 %% ===================================================================
 -ifdef(TEST).
 
-
 join_test() ->
     A  = new([v1]),
     A1 = update(A,a),
@@ -456,5 +456,40 @@ map_test() ->
     ?assertEqual( map(F,A) , {[{a,4,[]},{b,0,[]},{c,1,[]}],[20]}            ),
     ?assertEqual( map(F,B) , {[{a,4,[10,0]},{b,0,[]},{c,1,[4]}],[40,20]}    ),
     ok.
+
+%% Sucking in this resolve function from Plumtree.
+resolve(Val) ->
+    ResolveFun = fun(A, B) -> riak_dt_orswot:merge(A, B) end,
+    F = fun([Value | Rest]) -> lists:foldl(ResolveFun, Value, Rest) end,
+    dvvset:reconcile(F, Val).
+
+%% Testing to ensure the ORSWOT wrapper function discards unwanted
+%% ORSWOT values!!
+orswot_resolve_test() ->
+    A  = riak_dt_orswot:new(),
+    B  = riak_dt_orswot:new(),
+    C  = riak_dt_orswot:new(),
+    D  = riak_dt_orswot:new(),
+
+    {ok, A1}  = riak_dt_orswot:update({add_all, [52, 53]}, a, A),
+    {ok, B1}  = riak_dt_orswot:update({add_all, [52, 77, 82, 19]}, b, B),
+
+    R1 = riak_dt_orswot:merge(A1, B1),
+
+    {ok, C1}  = riak_dt_orswot:update({add_all, ["aaa", 99, at]}, c, C),
+    {ok, D1}  = riak_dt_orswot:update({add_all, [52, 77, 82, 19]}, d, D),
+
+    R2 = riak_dt_orswot:merge(C1, D1),
+    R3 = riak_dt_orswot:merge(R1, R2),
+
+    X  = { [ {a, 4, [A1]}, {b, 1, []}, {c, 1, [B1]}], []},
+
+    Y  = { [ {a, 4, [C1]}, {b, 1, []}, {c, 1, [D1]}], [R1]},
+
+    ?assertEqual( resolve(X), {[{a,4,[]},{b,1,[]},{c,1,[]}], [R1]} ),
+    ?assertEqual( resolve(Y), {[{a,4,[]},{b,1,[]},{c,1,[]}], [R3]} ),
+    %% ?assertEqual( reconcile(F2,X) , {[{a,4,[]},{b,1,[]},{c,1,[]}],[2]}  ),
+    %% ?assertEqual( reconcile(F2,Y) , {[{a,4,[]},{b,1,[]},{c,1,[]}],[0]}  ),
+    ok.    
 
 -endif.
