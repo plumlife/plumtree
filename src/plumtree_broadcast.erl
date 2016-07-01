@@ -565,17 +565,11 @@ all_peers(Root, Sets, Default) ->
     end.
 
 send(Msg, Peers) when is_list(Peers) ->
-    %% We need an explicit collection trigger here to test if this
-    %% fixes our memory leak when performing the `i_have` cast to a
-    %% downed node...
-    %% 
-    %% TODO: if this happens to be the fix then we may want a more
-    %% sophisticated system that isn't called on *every* function call
-    %% but possibly handled out-of-band in another process in response
-    %% to the heap size growing, or something... That would be
-    %% friendlier on the CPU.
+    [send(Msg, P) || P <- Peers];
+send(Msg, P) ->
+    %% TODO: add debug logging
     erlang:garbage_collect(),
-    gen_server:abcast(Peers, ?SERVER, Msg).
+    gen_server:cast({?SERVER, P}, Msg).
 
 schedule_lazy_tick() ->
     schedule_tick(lazy_tick, broadcast_lazy_timer, 1000).
