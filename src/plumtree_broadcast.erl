@@ -568,8 +568,9 @@ send(Msg, Peers) when is_list(Peers) ->
     [send(Msg, P) || P <- Peers];
 send(Msg, P) ->
     %% TODO: add debug logging
-    erlang:garbage_collect(),
-    gen_server:cast({?SERVER, P}, Msg).
+    %% TODO: lift this out so we just give it a list of peers instead
+    %% of singleton lists (THIS IS A TEST THOUGH)
+    gen_server:abcast([P], ?SERVER, Msg).
 
 schedule_lazy_tick() ->
     schedule_tick(lazy_tick, broadcast_lazy_timer, 1000).
