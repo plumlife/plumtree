@@ -1,7 +1,8 @@
-{"0.2.2",
+{"0.2.3",
   [{"0.2.1",
-    [ {apply,{os,cmd,["rm -rf /data/lightpad/plumtree/trees && sync"]}}
-    , {restart_application, plumtree}
+    [ {apply,{os,cmd,["rm -rf /data/lightpad/plumtree/trees && sync"]}},
+      {restart_application, plumtree},
+      {apply,{application,start,[plumtree]}}
     ]}
   ],
   [{"0.2.1",
